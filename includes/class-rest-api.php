@@ -250,9 +250,29 @@ private function sanitize_payload( array $data ) : array {
 	// SEO FIELDS — accept both top-level (new) and nested seo.* (legacy)
 	$seo = isset( $data['seo'] ) && is_array( $data['seo'] ) ? $data['seo'] : [];
 
+	// Resolve focus keyword (supports singular/plural, top-level/nested, string/array formats)
+	$focus_kw = null;
+	if ( ! empty( $data['focus_keyword'] ) ) {
+		$focus_kw = $data['focus_keyword'];
+	} elseif ( ! empty( $data['focus_keywords'] ) ) {
+		$focus_kw = $data['focus_keywords'];
+	} elseif ( ! empty( $seo['focus_keyword'] ) ) {
+		$focus_kw = $seo['focus_keyword'];
+	} elseif ( ! empty( $seo['focus_keywords'] ) ) {
+		$focus_kw = $seo['focus_keywords'];
+	}
+
+	if ( is_array( $focus_kw ) ) {
+		$focus_kw = array_map( 'sanitize_text_field', $focus_kw );
+		$focus_kw = implode( ', ', array_filter( $focus_kw ) );
+	} elseif ( is_string( $focus_kw ) ) {
+		$focus_kw = sanitize_text_field( $focus_kw );
+	} else {
+		$focus_kw = null;
+	}
+
 	$out['seo'] = [
-		// Focus keyword: top-level "focus_keyword" wins, fall back to seo.focus_keyword
-		'focus_keyword'    => $this->pick_field( $data, $seo, 'focus_keyword', 'sanitize_text_field' ),
+		'focus_keyword'    => $focus_kw,
 
 		// Meta title: only nested (not in new spec, but keep for compatibility)
 		'meta_title'       => isset( $seo['meta_title'] ) ? sanitize_text_field( $seo['meta_title'] ) : null,
