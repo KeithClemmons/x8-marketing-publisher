@@ -118,7 +118,8 @@ class Publisher {
 		$default_status = get_option( 'x8_publisher_default_status', 'draft' );
 		$default_author = (int) get_option( 'x8_publisher_default_author', 1 );
 
-		$status = ! empty( $data['status'] ) ? $data['status'] : $default_status;
+		// Always respect the WordPress local default status setting for new posts.
+		$status = $default_status;
 
 		$postarr = [
 			'post_title'   => sanitize_text_field( $data['title'] ),
