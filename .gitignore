@@ -1,28 +1,65 @@
-# IDE and editor files
-.vscode/
+# ==========================================
+# GitHub .gitignore template for WordPress Plugins
+# ==========================================
+
+# WordPress Core & uploads (just in case they end up here)
+wp-config.php
+wp-cli.local.yml
+/wp-content/uploads/
+/wp-content/blogs.dir/
+/wp-content/upgrade/
+/wp-content/backup-db/
+/wp-content/advanced-cache.php
+/wp-content/wp-cache-config.php
+/wp-content/cache/
+
+# Built files and packages
+node_modules/
+npm-debug.log
+yarn-error.log
+yarn-debug.log
+bower_components/
+vendor/
+composer.lock
+
+# Build archives / Release files
+*.zip
+*.tar.gz
+*.tgz
+build/
+dist/
+
+# Configuration files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE & Editor Specific Files
 .idea/
+.vscode/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
-
-# OS-generated files
+.project
+.settings/
+.buildpath
 .DS_Store
 .DS_Store?
 ._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
+ehthumbs.db
 
-# Log files
+# Logs and databases
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+*.sql
+*.sqlite
 
-# Dependencies
-node_modules/
-jspm_packages/
-vendor/
+# PHPUnit & Testing files
+.phpunit.result.cache
+/tests/assets/
+/tests/phpunit/multisite.xml
+/tests/phpunit/bootstrap.php
