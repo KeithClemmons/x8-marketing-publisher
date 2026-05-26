@@ -69,8 +69,17 @@ class Auth {
 		$ip  = $this->get_client_ip();
 		$key = 'x8_pub_rl_' . md5( $ip );
 
-		$count = (int) get_transient( $key );
-		if ( $count >= self::RATE_LIMIT_PER_MINUTE ) {
+		$data = get_transient( $key );
+		if ( false === $data || ! is_array( $data ) || ! isset( $data['count'], $data['expires'] ) ) {
+			$data = [
+				'count'   => 1,
+				'expires' => time() + MINUTE_IN_SECONDS,
+			];
+			set_transient( $key, $data, MINUTE_IN_SECONDS );
+			return true;
+		}
+
+		if ( $data['count'] >= self::RATE_LIMIT_PER_MINUTE ) {
 			return new \WP_Error(
 				'rate_limited',
 				'Too many requests. Limit: ' . self::RATE_LIMIT_PER_MINUTE . '/min.',
@@ -78,7 +87,18 @@ class Auth {
 			);
 		}
 
-		set_transient( $key, $count + 1, MINUTE_IN_SECONDS );
+		$data['count']++;
+		$remaining = $data['expires'] - time();
+		if ( $remaining > 0 ) {
+			set_transient( $key, $data, $remaining );
+		} else {
+			$data = [
+				'count'   => 1,
+				'expires' => time() + MINUTE_IN_SECONDS,
+			];
+			set_transient( $key, $data, MINUTE_IN_SECONDS );
+		}
+
 		return true;
 	}
 

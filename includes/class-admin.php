@@ -359,8 +359,16 @@ public static function logo_svg( int $height = 38 ) : string {
 				exit;
 
 			case 'save_settings':
-				update_option( 'x8_publisher_default_status', sanitize_key( wp_unslash( $_POST['default_status'] ?? 'draft' ) ) );
-				update_option( 'x8_publisher_default_author', (int) ( $_POST['default_author'] ?? 1 ) );
+				$status = sanitize_key( wp_unslash( $_POST['default_status'] ?? 'draft' ) );
+				if ( in_array( $status, [ 'draft', 'pending', 'publish' ], true ) ) {
+					update_option( 'x8_publisher_default_status', $status );
+				}
+
+				$author_id = (int) ( $_POST['default_author'] ?? 1 );
+				if ( get_userdata( $author_id ) ) {
+					update_option( 'x8_publisher_default_author', $author_id );
+				}
+
 				update_option( 'x8_publisher_sideload_images', ! empty( $_POST['sideload_images'] ) ? 1 : 0 );
 				wp_safe_redirect( admin_url( 'admin.php?page=' . self::MENU_SLUG . '&saved=1' ) );
 				exit;

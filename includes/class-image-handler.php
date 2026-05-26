@@ -38,6 +38,15 @@ class Image_Handler {
 			return new \WP_Error( 'image_sideload_failed', 'Empty image URL.' );
 		}
 
+		// Prevent memory/execution exhaustion on massive remote images.
+		$head_response = wp_safe_remote_head( $url, [ 'timeout' => 5 ] );
+		if ( ! is_wp_error( $head_response ) ) {
+			$size = (int) wp_remote_retrieve_header( $head_response, 'content-length' );
+			if ( $size > 10 * 1024 * 1024 ) { // 10MB limit
+				return new \WP_Error( 'image_sideload_failed', 'Image size exceeds 10MB limit.' );
+			}
+		}
+
 		$id = media_sideload_image( $url, $post_id, $desc, 'id' );
 		if ( is_wp_error( $id ) ) {
 			return new \WP_Error(
