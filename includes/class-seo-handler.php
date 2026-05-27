@@ -81,14 +81,10 @@ class SEO_Handler {
 		$written     = [];
 		$has_rm      = $this->has_rankmath();
 		$has_yoast   = $this->has_yoast();
-		$engine_used = self::NONE;
 
-		if ( ! $has_rm && ! $has_yoast ) {
-			return [
-				'engine'  => self::NONE,
-				'written' => [],
-			];
-		}
+		// Foolproof fallback: if plugin detection fails or constants aren't loaded yet
+		// during early REST API bootstrap, we still write both sets of meta keys to the database.
+		$force_write = ! $has_rm && ! $has_yoast;
 
 		foreach ( $seo_data as $field => $value ) {
 			if ( null === $value || '' === $value ) {
@@ -97,22 +93,25 @@ class SEO_Handler {
 
 			$value = is_string( $value ) ? wp_strip_all_tags( $value ) : $value;
 
-			if ( $has_rm && isset( self::RANKMATH_MAP[ $field ] ) ) {
+			if ( ( $has_rm || $force_write ) && isset( self::RANKMATH_MAP[ $field ] ) ) {
 				update_post_meta( $post_id, self::RANKMATH_MAP[ $field ], $value );
 				$written[] = self::RANKMATH_MAP[ $field ];
 			}
-			if ( $has_yoast && isset( self::YOAST_MAP[ $field ] ) ) {
+			if ( ( $has_yoast || $force_write ) && isset( self::YOAST_MAP[ $field ] ) ) {
 				update_post_meta( $post_id, self::YOAST_MAP[ $field ], $value );
 				$written[] = self::YOAST_MAP[ $field ];
 			}
 		}
 
+		$engine_used = self::NONE;
 		if ( $has_rm && $has_yoast ) {
 			$engine_used = 'rankmath+yoast';
 		} elseif ( $has_rm ) {
 			$engine_used = self::RANKMATH;
 		} elseif ( $has_yoast ) {
 			$engine_used = self::YOAST;
+		} elseif ( $force_write ) {
+			$engine_used = 'fallback-write';
 		}
 
 		return [
