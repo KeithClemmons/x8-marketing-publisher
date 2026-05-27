@@ -103,6 +103,22 @@ class SEO_Handler {
 			}
 		}
 
+		// Calculate and write a realistic fallback SEO score for Rank Math.
+		if ( ! empty( $seo_data['focus_keyword'] ) ) {
+			$post = get_post( $post_id );
+			$title   = $post ? $post->post_title : '';
+			$content = $post ? $post->post_content : '';
+			$slug    = $post ? $post->post_name : '';
+			$meta_desc = $seo_data['meta_description'] ?? '';
+
+			$fallback_score = $this->calculate_fallback_score( $seo_data['focus_keyword'], $title, $content, $meta_desc, $slug );
+			
+			if ( $has_rm || $force_write ) {
+				update_post_meta( $post_id, 'rank_math_seo_score', $fallback_score );
+				$written[] = 'rank_math_seo_score';
+			}
+		}
+
 		$engine_used = self::NONE;
 		if ( $has_rm && $has_yoast ) {
 			$engine_used = 'rankmath+yoast';
@@ -118,5 +134,65 @@ class SEO_Handler {
 			'engine'  => $engine_used,
 			'written' => $written,
 		];
+	}
+
+	/**
+	 * Calculate a realistic fallback SEO score (out of 100) for Rank Math.
+	 * This displays in the "All Posts" admin list immediately, and will be
+	 * recalculated dynamically when the admin opens the post in the Gutenberg/Classic editor.
+	 */
+	private function calculate_fallback_score( string $keyword, string $title, string $content, string $meta_desc, string $slug ) : int {
+		$keyword = trim( strtolower( $keyword ) );
+		if ( empty( $keyword ) ) {
+			return 0;
+		}
+
+		$score     = 10; // Base score
+		$title     = strtolower( $title );
+		$content   = strtolower( $content );
+		$slug      = strtolower( $slug );
+		$meta_desc = strtolower( $meta_desc );
+
+		// 1. Keyword in Title (approx 15 points)
+		if ( false !== strpos( $title, $keyword ) ) {
+			$score += 15;
+		}
+
+		// 2. Keyword in Meta Description (approx 10 points)
+		if ( ! empty( $meta_desc ) && false !== strpos( $meta_desc, $keyword ) ) {
+			$score += 10;
+		}
+
+		// 3. Keyword in URL/Slug (approx 10 points)
+		if ( ! empty( $slug ) && false !== strpos( $slug, str_replace( ' ', '-', $keyword ) ) ) {
+			$score += 10;
+		}
+
+		// 4. Keyword in Content (approx 15 points)
+		if ( false !== strpos( $content, $keyword ) ) {
+			$score += 15;
+		}
+
+		// 5. Content Length (approx 15 points)
+		$word_count = str_word_count( strip_tags( $content ) );
+		if ( $word_count > 1000 ) {
+			$score += 15;
+		} elseif ( $word_count > 500 ) {
+			$score += 10;
+		} elseif ( $word_count > 200 ) {
+			$score += 5;
+		}
+
+		// 6. Has images (approx 10 points)
+		if ( false !== strpos( $content, '<img' ) ) {
+			$score += 10;
+		}
+
+		// 7. Has links (approx 10 points)
+		if ( false !== strpos( $content, '<a ' ) ) {
+			$score += 10;
+		}
+
+		return min( max( $score, 10 ), 100 );
 	}
 }
