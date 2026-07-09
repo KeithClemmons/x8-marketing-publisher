@@ -12,6 +12,7 @@ $last4            = get_option( 'x8_publisher_api_key_last4', '----' );
 $last_request_at  = get_option( 'x8_publisher_last_request_at' );
 $default_status   = get_option( 'x8_publisher_default_status', 'draft' );
 $default_author   = (int) get_option( 'x8_publisher_default_author', 1 );
+$default_category = (int) get_option( 'x8_publisher_default_category', 0 );
 $sideload_images  = (bool) get_option( 'x8_publisher_sideload_images', 1 );
 $provisioned      = (bool) get_option( 'x8_publisher_provisioned' );
 $provisioned_at   = get_option( 'x8_publisher_provisioned_at' );
@@ -190,6 +191,23 @@ if ( $truly_connected ) {
 				<tr>
 					<th><label for="default_author">Default author</label></th>
 					<td><?php wp_dropdown_users( [ 'name' => 'default_author', 'selected' => $default_author, 'who' => 'authors' ] ); ?></td>
+				</tr>
+				<tr>
+					<th><label for="default_category">Default category</label></th>
+					<td>
+						<?php
+						wp_dropdown_categories( [
+							'show_option_none' => '— WordPress Default —',
+							'option_none_value' => '0',
+							'name'             => 'default_category',
+							'id'               => 'default_category',
+							'selected'         => $default_category,
+							'hierarchical'     => 1,
+							'hide_empty'       => 0,
+							'class'            => 'postform',
+						] );
+						?>
+					</td>
 				</tr>
 				<tr>
 					<th>Image handling</th>

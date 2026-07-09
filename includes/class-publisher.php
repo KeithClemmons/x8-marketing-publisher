@@ -181,11 +181,20 @@ class Publisher {
 		}
 
 		// Categories.
+		$cat_ids = [];
 		if ( ! empty( $data['categories'] ) && is_array( $data['categories'] ) ) {
 			$cat_ids = $this->resolve_terms( $data['categories'], 'category' );
-			if ( ! empty( $cat_ids ) ) {
-				wp_set_post_categories( $post_id, $cat_ids, false );
+		}
+
+		if ( empty( $cat_ids ) ) {
+			$default_cat = (int) get_option( 'x8_publisher_default_category', 0 );
+			if ( $default_cat > 0 ) {
+				$cat_ids = [ $default_cat ];
 			}
+		}
+
+		if ( ! empty( $cat_ids ) ) {
+			wp_set_post_categories( $post_id, $cat_ids, false );
 		}
 
 		// Tags.
