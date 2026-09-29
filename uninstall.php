@@ -23,3 +23,5 @@ foreach ( $options as $opt ) {
 
 // Clear scheduled cron.
 wp_clear_scheduled_hook( 'x8_publisher_cleanup_logs' );
+// Forget the cached GitHub release check.
+delete_site_transient( 'x8_publisher_release' );

@@ -1,0 +1,37 @@
+# Push a tag like v1.5.0 and this publishes the release that sites update to.
+# The tag must match the Version in x8-marketing-publisher.php.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the version matches the tag
+        run: |
+          header=$(grep -oP '^\s*\*\s*Version:\s*\K[0-9.]+' x8-marketing-publisher.php)
+          constant=$(grep -oP "define\( 'X8_PUBLISHER_VERSION', '\K[0-9.]+" x8-marketing-publisher.php)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$header" != "$tag" ] || [ "$constant" != "$tag" ]; then
+            echo "::error::Tag is $tag but the plugin says Version $header / X8_PUBLISHER_VERSION $constant. Bump both, then tag again."
+            exit 1
+          fi
+
+      - name: Check the PHP
+        run: find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l
+
+      - name: Build the zip
+        run: git archive --format=zip --prefix=x8-marketing-publisher/ -o x8-marketing-publisher.zip HEAD
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" x8-marketing-publisher.zip --title "$GITHUB_REF_NAME" --generate-notes

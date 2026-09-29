@@ -73,7 +73,10 @@ class REST_API {
 		] );
 
 		// Divi support for the control center's agents (see class-divi.php).
-		( new Divi( $this->auth ) )->register_routes();
+		// Skipped, not fatal, if that file didn't make it onto the server.
+		if ( class_exists( Divi::class ) ) {
+			( new Divi( $this->auth ) )->register_routes();
+		}
 
 		// NEW: Provisioning exchange endpoint — Netlify calls this with bootstrap token.
 		register_rest_route( X8_PUBLISHER_NAMESPACE, '/provision', [
@@ -92,7 +95,7 @@ class REST_API {
 			'plugin'         => 'x8-marketing-publisher',
 			'plugin_version' => X8_PUBLISHER_VERSION,
 			'provisioned'    => (bool) get_option( 'x8_publisher_provisioned' ),
-			'features'       => [ 'divi' => null !== Divi::version() ],
+			'features'       => [ 'divi' => class_exists( Divi::class ) && null !== Divi::version() ],
 			'timestamp'      => current_time( 'mysql' ),
 		], 200 );
 	}
