@@ -3,7 +3,7 @@
  * Plugin Name: X8 Marketing Publisher
  * Plugin URI:  https://x8marketing.com
  * Description: Publishes content from the X8 Marketing dashboard with full SEO meta support. Auto-provisions with Netlify on activation.
- * Version:     1.3.0
+ * Version:     1.4.0
  * Requires PHP: 7.4
  * Requires at least: 6.5
  * Author:      X8 Marketing
@@ -19,7 +19,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'X8_PUBLISHER_VERSION', '1.3.0' );
+define( 'X8_PUBLISHER_VERSION', '1.4.0' );
 define( 'X8_PUBLISHER_FILE', __FILE__ );
 define( 'X8_PUBLISHER_DIR', plugin_dir_path( __FILE__ ) );
 define( 'X8_PUBLISHER_URL', plugin_dir_url( __FILE__ ) );
@@ -37,6 +37,7 @@ require_once X8_PUBLISHER_DIR . 'includes/class-image-handler.php';
 require_once X8_PUBLISHER_DIR . 'includes/class-seo-handler.php';
 require_once X8_PUBLISHER_DIR . 'includes/class-publisher.php';
 require_once X8_PUBLISHER_DIR . 'includes/class-provisioning.php';
+require_once X8_PUBLISHER_DIR . 'includes/class-divi.php';
 require_once X8_PUBLISHER_DIR . 'includes/class-rest-api.php';
 require_once X8_PUBLISHER_DIR . 'includes/class-admin.php';
 
