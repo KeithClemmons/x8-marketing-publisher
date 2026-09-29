@@ -75,7 +75,7 @@ if ( $truly_connected ) {
 		</h1>
 		
 		<div class="x8-header-actions">
-			<form method="post" style="margin:0;" class="x8-dashboard-form">
+			<form method="post" style="margin:0;" class="x8-dashboard-form" target="_blank">
 				<input type="hidden" name="_x8_nonce" value="<?php echo esc_attr( $nonce ); ?>">
 				<input type="hidden" name="x8_action" value="open_dashboard">
 				<button type="submit" class="x8-header-link" style="cursor:pointer; background:none;">
@@ -133,7 +133,7 @@ if ( $truly_connected ) {
                 <strong>Open your X8 Marketing Dashboard</strong>
                 <span>Manage content, SEO, and campaigns for <?php echo esc_html( get_option( 'x8_publisher_business_name', 'your business' ) ); ?></span>
             </div>
-			<form method="post" style="margin:0;" class="x8-dashboard-form">
+			<form method="post" style="margin:0;" class="x8-dashboard-form" target="_blank">
 				<input type="hidden" name="_x8_nonce" value="<?php echo esc_attr( $nonce ); ?>">
 				<input type="hidden" name="x8_action" value="open_dashboard">
 				<button type="submit" class="button x8-btn x8-btn-large">
@@ -284,6 +284,7 @@ if ( $truly_connected ) {
 		form.addEventListener('submit', function() {
 			const btn = this.querySelector('button');
 			const text = this.querySelector('.x8-btn-text');
+			const label = text ? text.innerHTML : '';
 			
 			btn.style.pointerEvents = 'none';
 			btn.style.opacity = '0.7';
@@ -291,6 +292,13 @@ if ( $truly_connected ) {
 			if (text) {
 				text.innerHTML = '<span class="spinner is-active" style="float:none; margin:0 8px 0 0; vertical-align:middle;"></span> Opening dashboard...';
 			}
+
+			// The dashboard opens in a new tab, so this one stays here: put the button back.
+			setTimeout(() => {
+				btn.style.pointerEvents = '';
+				btn.style.opacity = '';
+				if (text) text.innerHTML = label;
+			}, 4000);
 		});
 	});
 
