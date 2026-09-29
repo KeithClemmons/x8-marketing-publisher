@@ -34,7 +34,7 @@ class REST_API {
 			'permission_callback' => [ $this, 'permission' ],
 		] );
 
-		register_rest_route( X8_PUBLISHER_NAMESPACE, '/post/(?P&lt;id&gt;\d+)/status', [
+		register_rest_route( X8_PUBLISHER_NAMESPACE, '/post/(?P<id>\d+)/status', [
 			'methods'             => 'POST',
 			'callback'            => [ $this, 'handle_status' ],
 			'permission_callback' => [ $this, 'permission' ],
@@ -43,7 +43,7 @@ class REST_API {
 			],
 		] );
 
-		register_rest_route( X8_PUBLISHER_NAMESPACE, '/post/(?P&lt;id&gt;\d+)', [
+		register_rest_route( X8_PUBLISHER_NAMESPACE, '/post/(?P<id>\d+)', [
 			'methods'             => 'DELETE',
 			'callback'            => [ $this, 'handle_delete' ],
 			'permission_callback' => [ $this, 'permission' ],
