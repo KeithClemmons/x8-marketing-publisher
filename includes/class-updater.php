@@ -11,6 +11,8 @@
  * wp-config.php overrides:
  *   define( 'X8_PUBLISHER_AUTO_UPDATE', false );  // offer updates, but don't install them unattended
  *   define( 'X8_PUBLISHER_UPDATE_REPO', 'owner/repo' );
+ *   define( 'X8_PUBLISHER_GITHUB_TOKEN', 'github_pat_...' ); // a private repo: a fine-grained
+ *       token for this one repository with read-only Contents access
  */
 
 namespace X8Marketing\Publisher;
@@ -44,6 +46,22 @@ final class Updater {
 		add_filter( 'auto_update_plugin', [ $this, 'auto_update' ], 10, 2 );
 		add_filter( 'plugin_row_meta', [ $this, 'row_links' ], 10, 2 );
 		add_action( 'load-update-core.php', [ $this, 'forget_on_force_check' ] );
+		add_filter( 'upgrader_pre_download', [ $this, 'download_private' ], 10, 4 );
+	}
+
+	private function token() : string {
+		return defined( 'X8_PUBLISHER_GITHUB_TOKEN' ) ? trim( (string) X8_PUBLISHER_GITHUB_TOKEN ) : '';
+	}
+
+	private function api_headers() : array {
+		$headers = [
+			'Accept'     => 'application/vnd.github+json',
+			'User-Agent' => 'x8-marketing-publisher/' . X8_PUBLISHER_VERSION,
+		];
+		if ( '' !== $this->token() ) {
+			$headers['Authorization'] = 'Bearer ' . $this->token();
+		}
+		return $headers;
 	}
 
 	private function repo() : string {
@@ -66,15 +84,19 @@ final class Updater {
 			'https://api.github.com/repos/' . $this->repo() . '/releases/latest',
 			[
 				'timeout' => 10,
-				'headers' => [
-					'Accept'     => 'application/vnd.github+json',
-					'User-Agent' => 'x8-marketing-publisher/' . X8_PUBLISHER_VERSION,
-				],
+				'headers' => $this->api_headers(),
 			]
 		);
 		$body = is_wp_error( $response ) ? null : json_decode( wp_remote_retrieve_body( $response ), true );
 
 		if ( 200 !== wp_remote_retrieve_response_code( $response ) || empty( $body['tag_name'] ) ) {
+			// A private repo answers 404 without a token.
+			error_log( sprintf( // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+				'X8 Marketing Publisher: couldn\'t check %s for updates (%s)%s',
+				$this->repo(),
+				is_wp_error( $response ) ? $response->get_error_message() : 'HTTP ' . wp_remote_retrieve_response_code( $response ),
+				'' === $this->token() ? '; if the repository is private, set X8_PUBLISHER_GITHUB_TOKEN in wp-config.php' : ''
+			) );
 			set_site_transient( self::CACHE, [ 'version' => '' ], HOUR_IN_SECONDS );
 			return null;
 		}
@@ -82,7 +104,8 @@ final class Updater {
 		$package = '';
 		foreach ( $body['assets'] ?? [] as $asset ) {
 			if ( self::ZIP === ( $asset['name'] ?? '' ) ) {
-				$package = (string) $asset['browser_download_url'];
+				// A private repo's files come through the API, with the token; see download_private().
+				$package = (string) ( '' !== $this->token() ? $asset['url'] : $asset['browser_download_url'] );
 			}
 		}
 
@@ -196,6 +219,38 @@ final class Updater {
 			return $update;
 		}
 		return defined( 'X8_PUBLISHER_AUTO_UPDATE' ) ? (bool) X8_PUBLISHER_AUTO_UPDATE : true;
+	}
+
+	/**
+	 * Downloads a private repo's release. GitHub answers the API with a redirect
+	 * to a signed file URL, which must be fetched without the token, so the
+	 * redirect is followed here rather than by WordPress.
+	 */
+	public function download_private( $reply, $package, $upgrader = null, $hook_extra = [] ) {
+		$api = 'https://api.github.com/repos/' . $this->repo() . '/';
+		if ( false !== $reply || '' === $this->token() || 0 !== strpos( (string) $package, $api ) ) {
+			return $reply;
+		}
+
+		$headers = $this->api_headers();
+		if ( false !== strpos( $package, '/releases/assets/' ) ) {
+			$headers['Accept'] = 'application/octet-stream';
+		}
+		$response = wp_remote_get( $package, [ 'timeout' => 30, 'redirection' => 0, 'headers' => $headers ] );
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+		$location = wp_remote_retrieve_header( $response, 'location' );
+		if ( ! $location ) {
+			return new \WP_Error(
+				'x8_publisher_download_failed',
+				sprintf( 'GitHub refused the download (HTTP %d). Check X8_PUBLISHER_GITHUB_TOKEN.', wp_remote_retrieve_response_code( $response ) )
+			);
+		}
+		if ( $upgrader && isset( $upgrader->skin ) ) {
+			$upgrader->skin->feedback( 'downloading_package', $package );
+		}
+		return download_url( is_array( $location ) ? end( $location ) : $location );
 	}
 
 	/**

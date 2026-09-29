@@ -388,10 +388,15 @@ public static function fetch_magic_link() {
 	$site_url = home_url();
 	$endpoint = 'https://app.x8webdesign.com/.netlify/functions/api/generate-magic-link';
 
+	// A one-time code the dashboard checks back with this site (with the key only it
+	// holds) before it issues a link, so knowing a username and URL isn't enough.
+	$nonce = bin2hex( random_bytes( 24 ) );
+	set_transient( 'x8_publisher_magic_' . $nonce, 1, 2 * MINUTE_IN_SECONDS );
+
 	$response = wp_remote_post(
 		$endpoint,
 		[
-			'timeout' => 10,
+			'timeout' => 20, // The dashboard calls back here before it answers.
 			'headers' => [
 				'Content-Type'  => 'application/json',
 				'X-X8-Site-URL' => $site_url,
@@ -399,6 +404,7 @@ public static function fetch_magic_link() {
 			'body'    => wp_json_encode( [
 				'site_url' => $site_url,
 				'username' => get_option( 'x8_publisher_username' ),
+				'nonce'    => $nonce,
 			] ),
 		]
 	);
@@ -421,6 +427,22 @@ public static function fetch_magic_link() {
 	}
 
 	return esc_url_raw( $body['url'] );
+}
+
+/**
+ * Whether this site made the code, in the last two minutes, for a link not yet issued.
+ * Each code works once.
+ */
+public static function use_magic_link_code( string $nonce ) : bool {
+	if ( ! preg_match( '/^[a-f0-9]{48}$/', $nonce ) ) {
+		return false;
+	}
+	$key = 'x8_publisher_magic_' . $nonce;
+	if ( ! get_transient( $key ) ) {
+		return false;
+	}
+	delete_transient( $key );
+	return true;
 }
     
     public function render_page() : void {

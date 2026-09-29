@@ -58,6 +58,14 @@ class REST_API {
 			'permission_callback' => [ $this, 'permission' ],
 		] );
 
+		// The dashboard asks here before it hands out a sign-in link for this site: only
+		// the dashboard holds the key, and only this site's own admin screen makes codes.
+		register_rest_route( X8_PUBLISHER_NAMESPACE, '/magic-link/confirm', [
+			'methods'             => 'POST',
+			'callback'            => [ $this, 'handle_magic_link_confirm' ],
+			'permission_callback' => [ $this, 'permission' ],
+		] );
+
 		register_rest_route( X8_PUBLISHER_NAMESPACE, '/test-connection', [
 			'methods'             => 'POST',
 			'callback'            => [ $this, 'handle_test_connection' ],
@@ -89,6 +97,11 @@ class REST_API {
 	/**
 	 * NEW: Lightweight ping (no auth) for client-side admin status check.
 	 */
+	public function handle_magic_link_confirm( \WP_REST_Request $request ) {
+		$confirmed = Admin::use_magic_link_code( (string) $request->get_param( 'nonce' ) );
+		return new \WP_REST_Response( [ 'confirmed' => $confirmed ], $confirmed ? 200 : 404 );
+	}
+
 	public function handle_ping() {
 		return new \WP_REST_Response( [
 			'success'        => true,
