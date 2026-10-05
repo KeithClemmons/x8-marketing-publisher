@@ -15,8 +15,8 @@
  *   GET  /divi/theme-builder             Theme Builder templates and their header, body and footer layouts
  *   GET  /divi/layouts/{id}              One Library item or Theme Builder layout, with its content
  *   POST /divi/layouts/{id}              Replace its content ({ content, expected_modified })
- *   GET  /divi/identity                  The site's identity: title, tagline, logo, header phone and email, footer credits, accent color
- *   POST /divi/identity                  Change any of those ({ site_title, tagline, logo, phone, email, footer_credits, accent_color })
+ *   GET  /divi/identity                  The site's identity: title, tagline, logo and its size, header phone and email, footer credits, accent color
+ *   POST /divi/identity                  Change any of those ({ site_title, tagline, logo, logo_height, phone, email, footer_credits, accent_color })
  *   POST /divi/validate                  Check Divi 5 block markup before it's saved ({ content, post_id? })
  *   GET  /divi/design                    The design system: global colors, fonts, variables and presets
  *   POST /divi/design                    Add or change global colors, fonts, variables and module presets ({ colors, fonts, variables, presets })
@@ -298,6 +298,8 @@ class Divi {
 			$values[ $field ] = self::theme_option( $key );
 		}
 		$values['footer_credits_shown'] = 'on' !== self::theme_option( 'disable_custom_footer_credits' );
+		// Divi's Logo Max Height: a percent of the header's height (54 unless changed).
+		$values['logo_height'] = (string) ( self::theme_option( 'logo_height' ) ?: '54' );
 		return $values;
 	}
 
@@ -320,6 +322,9 @@ class Divi {
 		}
 		if ( isset( $body['email'] ) && '' !== (string) $body['email'] && ! is_email( (string) $body['email'] ) ) {
 			return new \WP_Error( 'bad_email', 'That isn’t an email address.', [ 'status' => 400 ] );
+		}
+		if ( isset( $body['logo_height'] ) && ( ! is_numeric( $body['logo_height'] ) || (int) $body['logo_height'] < 30 || (int) $body['logo_height'] > 100 ) ) {
+			return new \WP_Error( 'bad_logo_height', 'The logo size is a percent of the header\'s height, from 30 to 100.', [ 'status' => 400 ] );
 		}
 		if ( isset( $body['logo'] ) && '' !== (string) $body['logo'] && ! wp_http_validate_url( (string) $body['logo'] ) ) {
 			return new \WP_Error( 'bad_logo', 'The logo must be an image address.', [ 'status' => 400 ] );
@@ -346,6 +351,9 @@ class Divi {
 		}
 		if ( isset( $body['accent_color'] ) ) {
 			self::set_theme_option( 'accent_color', sanitize_hex_color( (string) $body['accent_color'] ) );
+		}
+		if ( isset( $body['logo_height'] ) ) {
+			self::set_theme_option( 'logo_height', (string) (int) $body['logo_height'] );
 		}
 		self::clear_css( 'all' );
 
