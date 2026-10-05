@@ -15,6 +15,8 @@
  *   GET  /divi/theme-builder             Theme Builder templates and their header, body and footer layouts
  *   GET  /divi/layouts/{id}              One Library item or Theme Builder layout, with its content
  *   POST /divi/layouts/{id}              Replace its content ({ content, expected_modified })
+ *   GET  /divi/identity                  The site's identity: title, tagline, logo, header phone and email, footer credits, accent color
+ *   POST /divi/identity                  Change any of those ({ site_title, tagline, logo, phone, email, footer_credits, accent_color })
  *
  * Callers sign in as a WordPress user who can edit pages (an application
  * password), or with the plugin's API key.
@@ -82,6 +84,18 @@ class Divi {
 				'args'                => $id,
 			],
 		] );
+		register_rest_route( $ns, '/divi/identity', [
+			[
+				'methods'             => 'GET',
+				'callback'            => [ $this, 'identity' ],
+				'permission_callback' => [ $this, 'can_edit_identity' ],
+			],
+			[
+				'methods'             => 'POST',
+				'callback'            => [ $this, 'update_identity' ],
+				'permission_callback' => [ $this, 'can_edit_identity' ],
+			],
+		] );
 	}
 
 	// -------------------------------------------------------------------------
@@ -102,6 +116,16 @@ class Divi {
 			return current_user_can( 'edit_post', $id )
 				? true
 				: new \WP_Error( 'forbidden', 'This user can’t edit that item.', [ 'status' => 403 ] );
+		}
+		return $this->key_or_error( $request );
+	}
+
+	/** Theme options are an administrator's: a user who can edit them, or the plugin's API key. */
+	public function can_edit_identity( \WP_REST_Request $request ) {
+		if ( is_user_logged_in() ) {
+			return current_user_can( 'edit_theme_options' )
+				? true
+				: new \WP_Error( 'forbidden', 'This user can’t change the site’s theme options.', [ 'status' => 403 ] );
 		}
 		return $this->key_or_error( $request );
 	}
@@ -212,6 +236,99 @@ class Divi {
 			'edit_link'    => get_edit_post_link( $id, 'raw' ),
 			'builder_link' => add_query_arg( 'et_fb', '1', get_permalink( $id ) ),
 		], 200 );
+	}
+
+	// -------------------------------------------------------------------------
+	// Site identity: the Theme Options Divi's standard header and footer show
+
+	/** Divi's theme option keys for each identity field. */
+	const IDENTITY_OPTIONS = [
+		'logo'           => 'divi_logo',
+		'phone'          => 'phone_number',
+		'email'          => 'header_email',
+		'footer_credits' => 'custom_footer_credits',
+		'accent_color'   => 'accent_color',
+	];
+
+	private static function theme_option( string $key ) : string {
+		if ( function_exists( 'et_get_option' ) ) {
+			return (string) et_get_option( $key, '' );
+		}
+		$options = (array) get_option( 'et_divi', [] );
+		return isset( $options[ $key ] ) ? (string) $options[ $key ] : '';
+	}
+
+	private static function set_theme_option( string $key, $value ) : void {
+		if ( function_exists( 'et_update_option' ) ) {
+			et_update_option( $key, $value );
+			return;
+		}
+		$options         = (array) get_option( 'et_divi', [] );
+		$options[ $key ] = $value;
+		update_option( 'et_divi', $options );
+	}
+
+	private static function identity_values() : array {
+		$values = [
+			'site_title' => (string) get_bloginfo( 'name' ),
+			'tagline'    => (string) get_bloginfo( 'description' ),
+		];
+		foreach ( self::IDENTITY_OPTIONS as $field => $key ) {
+			$values[ $field ] = self::theme_option( $key );
+		}
+		$values['footer_credits_shown'] = 'on' !== self::theme_option( 'disable_custom_footer_credits' );
+		return $values;
+	}
+
+	public function identity() {
+		if ( null === self::version() ) {
+			return new \WP_Error( 'no_divi', 'Divi isn’t active on this site.', [ 'status' => 409 ] );
+		}
+		return new \WP_REST_Response( self::identity_values(), 200 );
+	}
+
+	/** Changes the fields sent; leaves the rest. Clears Divi's CSS so a new accent color shows. */
+	public function update_identity( \WP_REST_Request $request ) {
+		if ( null === self::version() ) {
+			return new \WP_Error( 'no_divi', 'Divi isn’t active on this site.', [ 'status' => 409 ] );
+		}
+		$body = (array) $request->get_json_params();
+
+		if ( isset( $body['accent_color'] ) && null === sanitize_hex_color( (string) $body['accent_color'] ) ) {
+			return new \WP_Error( 'bad_color', 'The accent color must be a hex color like #1f6feb.', [ 'status' => 400 ] );
+		}
+		if ( isset( $body['email'] ) && '' !== (string) $body['email'] && ! is_email( (string) $body['email'] ) ) {
+			return new \WP_Error( 'bad_email', 'That isn’t an email address.', [ 'status' => 400 ] );
+		}
+		if ( isset( $body['logo'] ) && '' !== (string) $body['logo'] && ! wp_http_validate_url( (string) $body['logo'] ) ) {
+			return new \WP_Error( 'bad_logo', 'The logo must be an image address.', [ 'status' => 400 ] );
+		}
+
+		if ( isset( $body['site_title'] ) ) {
+			update_option( 'blogname', sanitize_text_field( (string) $body['site_title'] ) );
+		}
+		if ( isset( $body['tagline'] ) ) {
+			update_option( 'blogdescription', sanitize_text_field( (string) $body['tagline'] ) );
+		}
+		if ( isset( $body['logo'] ) ) {
+			self::set_theme_option( 'divi_logo', esc_url_raw( (string) $body['logo'] ) );
+		}
+		if ( isset( $body['phone'] ) ) {
+			self::set_theme_option( 'phone_number', sanitize_text_field( (string) $body['phone'] ) );
+		}
+		if ( isset( $body['email'] ) ) {
+			self::set_theme_option( 'header_email', sanitize_email( (string) $body['email'] ) );
+		}
+		if ( isset( $body['footer_credits'] ) ) {
+			self::set_theme_option( 'custom_footer_credits', wp_kses_post( (string) $body['footer_credits'] ) );
+			self::set_theme_option( 'disable_custom_footer_credits', 'false' );
+		}
+		if ( isset( $body['accent_color'] ) ) {
+			self::set_theme_option( 'accent_color', sanitize_hex_color( (string) $body['accent_color'] ) );
+		}
+		self::clear_css( 'all' );
+
+		return new \WP_REST_Response( self::identity_values(), 200 );
 	}
 
 	// -------------------------------------------------------------------------
