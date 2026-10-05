@@ -270,8 +270,9 @@ class Divi {
 
 	private static function identity_values() : array {
 		$values = [
-			'site_title' => (string) get_bloginfo( 'name' ),
-			'tagline'    => (string) get_bloginfo( 'description' ),
+			// Stored HTML-escaped; sent as people typed them.
+			'site_title' => wp_specialchars_decode( (string) get_option( 'blogname' ), ENT_QUOTES ),
+			'tagline'    => wp_specialchars_decode( (string) get_option( 'blogdescription' ), ENT_QUOTES ),
 		];
 		foreach ( self::IDENTITY_OPTIONS as $field => $key ) {
 			$values[ $field ] = self::theme_option( $key );
