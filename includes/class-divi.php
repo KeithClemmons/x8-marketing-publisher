@@ -19,7 +19,7 @@
  *   POST /divi/identity                  Change any of those ({ site_title, tagline, logo, phone, email, footer_credits, accent_color })
  *   POST /divi/validate                  Check Divi 5 block markup before it's saved ({ content, post_id? })
  *   GET  /divi/design                    The design system: global colors, fonts, variables and presets
- *   POST /divi/design                    Add or change global colors, fonts and module presets ({ colors, fonts, presets })
+ *   POST /divi/design                    Add or change global colors, fonts, variables and module presets ({ colors, fonts, variables, presets })
  *
  * Callers sign in as a WordPress user who can edit pages (an application
  * password), or with the plugin's API key.
@@ -462,7 +462,8 @@ class Divi {
 		$counts  = [];
 		$design  = self::design_values( false );
 		$index   = 0;
-		$walk    = function ( array $blocks ) use ( &$walk, &$report, &$counts, &$index, $known, $design ) {
+		$registry = \WP_Block_Type_Registry::get_instance();
+		$walk     = function ( array $blocks, string $parent ) use ( &$walk, &$report, &$counts, &$index, $known, $design, $registry ) {
 			foreach ( $blocks as $block ) {
 				$name = $block['blockName'] ?? null;
 				if ( null === $name ) {
@@ -473,14 +474,21 @@ class Divi {
 				}
 				$index++;
 				$counts[ $name ] = ( $counts[ $name ] ?? 0 ) + 1;
-				if ( 0 === strpos( $name, 'divi/' ) && $known && ! isset( $known[ $name ] ) ) {
-					self::note( $report, 'errors', 'unknown_module', "{$name} isn't a Divi module on this site.", $name, $index );
+				// Modules from Divi or an add-on (e.g. Divi Supreme) that this site doesn't have render as nothing.
+				if ( $known && 0 !== strpos( $name, 'core/' ) && ! $registry->is_registered( $name ) ) {
+					self::note( $report, 'errors', 'unknown_module', "{$name} isn't a module on this site (is the plugin that provides it active?).", $name, $index );
 				}
-				self::check_module( $name, is_array( $block['attrs'] ?? null ) ? $block['attrs'] : [], $index, $report, $design );
-				$walk( (array) ( $block['innerBlocks'] ?? [] ) );
+				$attrs = is_array( $block['attrs'] ?? null ) ? $block['attrs'] : [];
+				self::check_place( $name, $parent, $index, $report );
+				self::check_module( $name, $attrs, $index, $report, $design );
+				if ( 'divi/group' === $name ) {
+					self::check_group( (array) ( $block['innerBlocks'] ?? [] ), $index, $report );
+				}
+				self::check_hardcoded_colors( $name, $attrs, $index, $report, $design );
+				$walk( (array) ( $block['innerBlocks'] ?? [] ), $name );
 			}
 		};
-		$walk( $blocks );
+		$walk( $blocks, '' );
 		if ( ! $known && preg_grep( '/^divi\//', array_keys( $counts ) ) ) {
 			self::note( $report, 'warnings', 'no_divi5', 'Divi 5 isn\'t active on this site, so only the markup\'s shape was checked.' );
 		}
@@ -544,6 +552,133 @@ class Divi {
 			'modules'  => $counts,
 			'rendered' => $rendered,
 		];
+	}
+
+	/**
+	 * Where Divi 5 modules can go: the containers that hold only their own
+	 * items, and the items that only work inside them. From real Divi 5
+	 * exports (after the JHMG AI Editor for Divi 5's validator, GPL-2.0-or-later).
+	 */
+	const ONLY_CHILDREN = [
+		'divi/row'                  => [ 'divi/column' ],
+		'divi/row-inner'            => [ 'divi/column-inner' ],
+		'divi/accordion'            => [ 'divi/accordion-item', 'divi/code' ],
+		'divi/contact-form'         => [ 'divi/contact-field' ],
+		'divi/counters'             => [ 'divi/counter' ],
+		'divi/icon-list'            => [ 'divi/icon-list-item' ],
+		'divi/pricing-tables'       => [ 'divi/pricing-table' ],
+		'divi/slider'               => [ 'divi/slide' ],
+		'divi/fullwidth-slider'     => [ 'divi/slide' ],
+		'divi/tabs'                 => [ 'divi/tab' ],
+		'divi/social-media-follow'  => [ 'divi/social-media-follow-network' ],
+		'divi/timeline'             => [ 'divi/timeline-item' ],
+		'divi/group-carousel'       => [ 'divi/group' ],
+		'divi/video-slider'         => [ 'divi/video-slider-item' ],
+		'divi/post-filter'          => [ 'divi/post-filter-item' ],
+		'divi/fullwidth-map'        => [ 'divi/map-pin' ],
+		'divi/placeholder'          => [ 'divi/section', 'divi/global-layout' ],
+	];
+
+	const ONLY_PARENTS = [
+		'divi/section'                     => [ 'divi/placeholder', '' ],
+		'divi/column'                      => [ 'divi/row', 'divi/section' ],
+		'divi/column-inner'                => [ 'divi/row-inner' ],
+		'divi/accordion-item'              => [ 'divi/accordion' ],
+		'divi/contact-field'               => [ 'divi/contact-form' ],
+		'divi/counter'                     => [ 'divi/counters' ],
+		'divi/icon-list-item'              => [ 'divi/icon-list' ],
+		'divi/pricing-table'               => [ 'divi/pricing-tables' ],
+		'divi/slide'                       => [ 'divi/slider', 'divi/fullwidth-slider' ],
+		'divi/tab'                         => [ 'divi/tabs' ],
+		'divi/social-media-follow-network' => [ 'divi/social-media-follow' ],
+		'divi/timeline-item'               => [ 'divi/timeline' ],
+		'divi/video-slider-item'           => [ 'divi/video-slider' ],
+		'divi/post-filter-item'            => [ 'divi/post-filter' ],
+		'divi/map-pin'                     => [ 'divi/fullwidth-map' ],
+	];
+
+	private static function check_place( string $name, string $parent, int $i, array &$report ) : void {
+		$where = '' === $parent ? 'at the top of the page' : "directly in {$parent}";
+		if ( isset( self::ONLY_CHILDREN[ $parent ] ) && ! in_array( $name, self::ONLY_CHILDREN[ $parent ], true ) ) {
+			self::note( $report, 'errors', 'misplaced', "{$name} can't go {$where}; {$parent} holds only " . implode( ' or ', self::ONLY_CHILDREN[ $parent ] ) . '.', $name, $i );
+			return;
+		}
+		if ( isset( self::ONLY_PARENTS[ $name ] ) && ! in_array( $parent, self::ONLY_PARENTS[ $name ], true ) ) {
+			$allowed = array_filter( self::ONLY_PARENTS[ $name ] );
+			self::note( $report, 'errors', 'misplaced', "{$name} can't go {$where}; it belongs in " . implode( ' or ', $allowed ) . '.', $name, $i );
+			return;
+		}
+		if ( 'divi/section' === $parent && 0 !== strpos( $name, 'divi/row' ) && 'divi/column' !== $name && 'divi/global-layout' !== $name && 0 !== strpos( $name, 'divi/fullwidth-' ) ) {
+			self::note( $report, 'errors', 'misplaced', "{$name} can't go directly in a section; put it in a row's column.", $name, $i );
+		}
+	}
+
+	/** A Group of an icon or image, a heading and text (and maybe a button) is what a Blurb is for. */
+	private static function check_group( array $children, int $i, array &$report ) : void {
+		$names = [];
+		foreach ( $children as $child ) {
+			if ( ! empty( $child['blockName'] ) ) {
+				$names[] = $child['blockName'];
+			}
+		}
+		$visual  = array_intersect( $names, [ 'divi/icon', 'divi/image' ] );
+		$rest    = array_diff( $names, [ 'divi/icon', 'divi/image', 'divi/heading', 'divi/text', 'divi/button' ] );
+		if ( 1 === count( $visual ) && in_array( 'divi/heading', $names, true ) && in_array( 'divi/text', $names, true ) && ! $rest && count( $names ) <= 4 ) {
+			self::note( $report, 'warnings', 'group_could_be_blurb', 'This Group is an icon or image with a heading and text: use a Blurb module (with its own button or link) so it\'s one module to edit.', 'divi/group', $i );
+		}
+	}
+
+	/** Hex colors typed into a module's design settings that the site already has as a global color. */
+	private static function check_hardcoded_colors( string $name, array $attrs, int $i, array &$report, array $design ) : void {
+		if ( ! $design['divi5'] || 0 !== strpos( $name, 'divi/' ) ) {
+			return;
+		}
+		$globals = [];
+		foreach ( $design['colors'] as $c ) {
+			$hex = self::normal_hex( (string) $c['color'] );
+			if ( $hex && ! isset( $globals[ $hex ] ) ) {
+				$globals[ $hex ] = $c;
+			}
+		}
+		if ( ! $globals ) {
+			return;
+		}
+		$found = [];
+		$scan  = function ( $value, string $key ) use ( &$scan, &$found, $globals ) {
+			if ( 'innerContent' === $key ) {
+				return; // The words, not the design.
+			}
+			if ( is_array( $value ) ) {
+				foreach ( $value as $k => $v ) {
+					$scan( $v, (string) $k );
+				}
+			} elseif ( is_string( $value ) ) {
+				$hex = self::normal_hex( $value );
+				if ( $hex && isset( $globals[ $hex ] ) ) {
+					$found[ $hex ] = $globals[ $hex ];
+				}
+			}
+		};
+		$scan( $attrs, '' );
+		foreach ( $found as $hex => $c ) {
+			self::note( $report, 'warnings', 'hardcoded_color', "It types {$hex}, which is the site's global color \"{$c['label']}\" ({$c['id']}): use the global color instead, so it changes with the site.", $name, $i );
+		}
+	}
+
+	/** #abc, #aabbcc or #aabbccff as lowercase #aabbcc(ff); null for anything else. */
+	private static function normal_hex( string $value ) : ?string {
+		$value = strtolower( trim( $value ) );
+		if ( ! preg_match( '/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/', $value, $m ) ) {
+			return null;
+		}
+		$hex = $m[1];
+		if ( 3 === strlen( $hex ) ) {
+			$hex = $hex[0] . $hex[0] . $hex[1] . $hex[1] . $hex[2] . $hex[2];
+		}
+		if ( 8 === strlen( $hex ) && 'ff' === substr( $hex, 6 ) ) {
+			$hex = substr( $hex, 0, 6 );
+		}
+		return '#' . $hex;
 	}
 
 	/** Settings Divi stores but never reads, or reads differently, per module. */
@@ -778,7 +913,8 @@ class Divi {
 	/**
 	 * Adds or changes global colors ({ id?, label, color }; an id of a color
 	 * bound to Theme Options, like gcid-primary-color, changes that option),
-	 * the heading and body fonts ({ heading, body }), and module presets
+	 * the heading and body fonts ({ heading, body }), existing global
+	 * variables' values ({ id, value }), and module presets
 	 * ({ module, name, attrs, id?, default? }; a preset with that id, or with
 	 * no id and the same name on that module, is updated; a new id is used for
 	 * a new preset). Everything is checked before anything is saved.
@@ -861,6 +997,35 @@ class Divi {
 			}
 		}
 
+		// Global variables: the values of ones the site has (spacing, sizes, fonts...).
+		$variables       = self::as_array( get_option( self::VARIABLES_OPTION, [] ) );
+		$variables_dirty = false;
+		foreach ( (array) ( $body['variables'] ?? [] ) as $n => $v ) {
+			$v     = (array) $v;
+			$id    = sanitize_text_field( (string) ( $v['id'] ?? '' ) );
+			$value = trim( (string) ( $v['value'] ?? '' ) );
+			$type  = null;
+			foreach ( $variables as $t => $items ) {
+				if ( is_array( $items ) && is_array( $items[ $id ] ?? null ) ) {
+					$type = (string) $t;
+				}
+			}
+			if ( null === $type ) {
+				return $bad( "variables[{$n}]: the site has no global variable {$id}; only existing ones can be changed here." );
+			}
+			if ( 'gradients' === $type ) {
+				return $bad( "variables[{$n}]: {$id} is a gradient; change it in Divi's Variable Manager." );
+			}
+			if ( '' === $value || strlen( $value ) > 500 ) {
+				return $bad( "variables[{$n}]: give {$id} a value." );
+			}
+			$value = in_array( $type, [ 'images', 'links' ], true ) ? esc_url_raw( $value ) : sanitize_text_field( $value );
+			$variables[ $type ][ $id ]['value']       = $value;
+			$variables[ $type ][ $id ]['lastUpdated'] = $now_iso;
+			$variables_dirty = true;
+			$made[]          = [ 'kind' => 'variable', 'id' => $id, 'label' => (string) ( $variables[ $type ][ $id ]['label'] ?? $id ) ];
+		}
+
 		// Module presets.
 		$registry      = self::preset_registry();
 		$presets_dirty = false;
@@ -915,7 +1080,7 @@ class Divi {
 		}
 
 		if ( ! $made && ! $fonts ) {
-			return $bad( 'Nothing to change: send colors, fonts or presets.' );
+			return $bad( 'Nothing to change: send colors, fonts, variables or presets.' );
 		}
 
 		foreach ( $theme_changes as $option => $color ) {
@@ -927,6 +1092,9 @@ class Divi {
 		}
 		foreach ( $fonts as $option => $font ) {
 			self::set_theme_option( $option, $font );
+		}
+		if ( $variables_dirty ) {
+			update_option( self::VARIABLES_OPTION, $variables );
 		}
 		if ( $presets_dirty ) {
 			update_option( self::PRESETS_OPTION, $registry, false );
