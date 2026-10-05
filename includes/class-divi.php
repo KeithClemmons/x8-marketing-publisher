@@ -19,6 +19,7 @@
  *   POST /divi/identity                  Change any of those ({ site_title, tagline, logo, logo_height, phone, email, footer_credits, accent_color })
  *   GET  /divi/site-template             The header and footer every page gets (Theme Builder), and the site's menus
  *   POST /divi/site-template             Set them ({ header, footer, expected_header_modified, expected_footer_modified })
+ *   POST /divi/preview                   A private page showing Divi markup as it will look ({ content, header, footer, title }), by a link with a token
  *   POST /divi/validate                  Check Divi 5 block markup before it's saved ({ content, post_id? })
  *   GET  /divi/design                    The design system: global colors, fonts, variables and presets
  *   POST /divi/design                    Add or change global colors, fonts, variables and module presets ({ colors, fonts, variables, presets })
@@ -112,6 +113,11 @@ class Divi {
 				'callback'            => [ $this, 'update_site_template' ],
 				'permission_callback' => [ $this, 'can_edit_identity' ],
 			],
+		] );
+		register_rest_route( $ns, '/divi/preview', [
+			'methods'             => 'POST',
+			'callback'            => [ $this, 'preview' ],
+			'permission_callback' => [ $this, 'can_edit' ],
 		] );
 		register_rest_route( $ns, '/divi/validate', [
 			'methods'             => 'POST',
@@ -533,6 +539,105 @@ class Divi {
 		self::clear_css( 'all' );
 
 		return new \WP_REST_Response( self::site_template_values(), 200 );
+	}
+
+	// -------------------------------------------------------------------------
+	// Previews: drafts shown as they'll look, before anyone approves them
+	//
+	// Each preview is a private page, opened by its link's token without
+	// signing in, hidden from search engines, and deleted after two days.
+
+	const PREVIEW_TOKEN   = '_x8_preview_token';
+	const PREVIEW_EXPIRES = '_x8_preview_expires';
+	const PREVIEW_TTL     = 2 * DAY_IN_SECONDS;
+
+	public static function preview_hooks() : void {
+		add_action( 'pre_get_posts', [ self::class, 'show_preview' ] );
+		add_filter( 'wp_robots', static function ( array $robots ) {
+			if ( isset( $_GET['x8_preview'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+				$robots['noindex']  = true;
+				$robots['nofollow'] = true;
+			}
+			return $robots;
+		} );
+	}
+
+	/** Lets the preview's link show its private page to anyone holding the token, until it expires. */
+	public static function show_preview( \WP_Query $query ) : void {
+		if ( is_admin() || ! $query->is_main_query() || empty( $_GET['x8_preview'] ) || empty( $_GET['page_id'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			return;
+		}
+		$id    = (int) $_GET['page_id']; // phpcs:ignore WordPress.Security.NonceVerification
+		$token = sanitize_text_field( wp_unslash( (string) $_GET['x8_preview'] ) ); // phpcs:ignore WordPress.Security.NonceVerification
+		$saved = (string) get_post_meta( $id, self::PREVIEW_TOKEN, true );
+		if ( '' === $saved || ! hash_equals( $saved, $token ) || (int) get_post_meta( $id, self::PREVIEW_EXPIRES, true ) < time() ) {
+			return;
+		}
+		$query->set( 'post_status', [ 'private' ] );
+		if ( ! headers_sent() ) {
+			header( 'X-Robots-Tag: noindex, nofollow' );
+			header( 'Cache-Control: no-store' );
+		}
+	}
+
+	/** The blocks inside markup's placeholder wrapper (or the markup itself). */
+	private static function unwrap( string $markup ) : string {
+		$markup = trim( $markup );
+		$markup = preg_replace( '/^<!--\s+wp:divi\/placeholder\s+-->/', '', $markup );
+		return (string) preg_replace( '/<!--\s+\/wp:divi\/placeholder\s+-->$/', '', (string) $markup );
+	}
+
+	public function preview( \WP_REST_Request $request ) {
+		if ( null === self::version() ) {
+			return new \WP_Error( 'no_divi', 'Divi isn’t active on this site.', [ 'status' => 409 ] );
+		}
+		$body   = (array) $request->get_json_params();
+		$parts  = [];
+		foreach ( [ 'header', 'content', 'footer' ] as $key ) {
+			if ( isset( $body[ $key ] ) && '' !== trim( (string) $body[ $key ] ) ) {
+				$parts[ $key ] = self::unwrap( (string) $body[ $key ] );
+			}
+		}
+		if ( ! $parts || false === strpos( implode( '', $parts ), '<!-- wp:divi/' ) ) {
+			return new \WP_Error( 'missing_content', 'Send Divi 5 markup to preview: content, header or footer.', [ 'status' => 400 ] );
+		}
+
+		// Old previews go.
+		foreach ( get_posts( [
+			'post_type'      => 'page',
+			'post_status'    => 'private',
+			'posts_per_page' => 50,
+			'fields'         => 'ids',
+			'meta_query'     => [ [ 'key' => self::PREVIEW_EXPIRES, 'value' => time(), 'compare' => '<', 'type' => 'NUMERIC' ] ], // phpcs:ignore WordPress.DB.SlowDBQuery
+		] ) as $old ) {
+			wp_delete_post( (int) $old, true );
+		}
+
+		$title = sanitize_text_field( (string) ( $body['title'] ?? '' ) ) ?: 'Draft';
+		$id    = wp_insert_post( [
+			'post_type'    => 'page',
+			'post_status'  => 'private',
+			'post_title'   => 'Preview: ' . $title,
+			'post_content' => wp_slash( '<!-- wp:divi/placeholder -->' . implode( '', $parts ) . '<!-- /wp:divi/placeholder -->' ),
+		], true );
+		if ( is_wp_error( $id ) ) {
+			return $id;
+		}
+		$token = wp_generate_password( 32, false );
+		update_post_meta( $id, self::PREVIEW_TOKEN, $token );
+		update_post_meta( $id, self::PREVIEW_EXPIRES, time() + self::PREVIEW_TTL );
+		update_post_meta( $id, '_et_pb_use_builder', 'on' );
+		update_post_meta( $id, '_et_pb_use_divi_5', 'on' );
+		update_post_meta( $id, '_et_pb_page_layout', 'et_no_sidebar' );
+		update_post_meta( $id, '_et_pb_side_nav', 'off' );
+		if ( isset( $parts['header'] ) || isset( $parts['footer'] ) ) {
+			// A header or footer is shown as itself, without the site's current ones around it.
+			update_post_meta( $id, '_wp_page_template', 'page-template-blank.php' );
+		}
+		return new \WP_REST_Response( [
+			'url'     => add_query_arg( [ 'page_id' => $id, 'x8_preview' => $token ], home_url( '/' ) ),
+			'expires' => gmdate( 'c', time() + self::PREVIEW_TTL ),
+		], 200 );
 	}
 
 	// -------------------------------------------------------------------------
