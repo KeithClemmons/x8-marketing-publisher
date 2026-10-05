@@ -17,6 +17,8 @@
  *   POST /divi/layouts/{id}              Replace its content ({ content, expected_modified })
  *   GET  /divi/identity                  The site's identity: title, tagline, logo and its size, header phone and email, footer credits, accent color
  *   POST /divi/identity                  Change any of those ({ site_title, tagline, logo, logo_height, phone, email, footer_credits, accent_color })
+ *   GET  /divi/site-template             The header and footer every page gets (Theme Builder), and the site's menus
+ *   POST /divi/site-template             Set them ({ header, footer, expected_header_modified, expected_footer_modified })
  *   POST /divi/validate                  Check Divi 5 block markup before it's saved ({ content, post_id? })
  *   GET  /divi/design                    The design system: global colors, fonts, variables and presets
  *   POST /divi/design                    Add or change global colors, fonts, variables and module presets ({ colors, fonts, variables, presets })
@@ -96,6 +98,18 @@ class Divi {
 			[
 				'methods'             => 'POST',
 				'callback'            => [ $this, 'update_identity' ],
+				'permission_callback' => [ $this, 'can_edit_identity' ],
+			],
+		] );
+		register_rest_route( $ns, '/divi/site-template', [
+			[
+				'methods'             => 'GET',
+				'callback'            => [ $this, 'site_template' ],
+				'permission_callback' => [ $this, 'can_edit' ],
+			],
+			[
+				'methods'             => 'POST',
+				'callback'            => [ $this, 'update_site_template' ],
 				'permission_callback' => [ $this, 'can_edit_identity' ],
 			],
 		] );
@@ -358,6 +372,167 @@ class Divi {
 		self::clear_css( 'all' );
 
 		return new \WP_REST_Response( self::identity_values(), 200 );
+	}
+
+	// -------------------------------------------------------------------------
+	// The site's own header and footer: the Theme Builder's default template
+
+	/** The live Theme Builder (Divi makes it on first use). */
+	private static function theme_builder_id( bool $create ) : int {
+		if ( function_exists( 'et_theme_builder_get_theme_builder_post_id' ) ) {
+			return (int) et_theme_builder_get_theme_builder_post_id( true, $create );
+		}
+		$found = get_posts( [
+			'post_type'      => 'et_theme_builder',
+			'post_status'    => 'publish',
+			'posts_per_page' => 1,
+			'orderby'        => 'date',
+			'order'          => 'DESC',
+			'meta_query'     => [ [ 'key' => '_et_library_theme_builder', 'compare' => 'NOT EXISTS' ] ], // phpcs:ignore WordPress.DB.SlowDBQuery
+		] );
+		if ( $found ) {
+			return (int) $found[0]->ID;
+		}
+		if ( ! $create ) {
+			return 0;
+		}
+		$id = wp_insert_post( [ 'post_type' => 'et_theme_builder', 'post_status' => 'publish', 'post_title' => 'Theme Builder' ], true );
+		return is_wp_error( $id ) ? 0 : (int) $id;
+	}
+
+	/** The "Default Website Template": the one every page uses unless another matches. */
+	private static function default_template_id( int $builder ) : int {
+		if ( ! $builder ) {
+			return 0;
+		}
+		foreach ( array_map( 'intval', (array) get_post_meta( $builder, '_et_template' ) ) as $id ) {
+			$t = get_post( $id );
+			if ( $t && 'et_template' === $t->post_type && 'trash' !== $t->post_status && '1' === (string) get_post_meta( $id, '_et_default', true ) ) {
+				return $id;
+			}
+		}
+		return 0;
+	}
+
+	private static function area_layout( int $template, string $area ) : ?\WP_Post {
+		if ( ! $template ) {
+			return null;
+		}
+		$post = get_post( (int) get_post_meta( $template, "_et_{$area}_layout_id", true ) );
+		return $post && "et_{$area}_layout" === $post->post_type && 'trash' !== $post->post_status ? $post : null;
+	}
+
+	private static function site_template_values() : array {
+		$template = self::default_template_id( self::theme_builder_id( false ) );
+		$area     = function ( string $name ) use ( $template ) {
+			$post = self::area_layout( $template, $name );
+			return $post ? [
+				'id'       => $post->ID,
+				'enabled'  => '0' !== (string) get_post_meta( $template, "_et_{$name}_layout_enabled", true ),
+				'modified' => mysql_to_rfc3339( $post->post_modified_gmt ),
+				'content'  => $post->post_content,
+			] : null;
+		};
+		$menus = [];
+		$locations = array_flip( array_map( 'intval', (array) get_nav_menu_locations() ) );
+		foreach ( wp_get_nav_menus() as $menu ) {
+			$menus[] = [ 'id' => (int) $menu->term_id, 'name' => $menu->name, 'items' => (int) $menu->count, 'location' => $locations[ (int) $menu->term_id ] ?? null ];
+		}
+		return [
+			'template_id' => $template ?: null,
+			'header'      => $area( 'header' ),
+			'footer'      => $area( 'footer' ),
+			'menus'       => $menus,
+		];
+	}
+
+	public function site_template() {
+		if ( null === self::version() || ! post_type_exists( 'et_template' ) ) {
+			return new \WP_Error( 'no_theme_builder', 'The Divi Theme Builder isn’t available on this site.', [ 'status' => 409 ] );
+		}
+		return new \WP_REST_Response( self::site_template_values(), 200 );
+	}
+
+	/**
+	 * Sets the header and/or footer of the Default Website Template, making
+	 * the template (and the Theme Builder) when the site has none. An area's
+	 * existing layout is updated in place; refused if it changed since the
+	 * caller read it.
+	 */
+	public function update_site_template( \WP_REST_Request $request ) {
+		if ( null === self::version() || ! post_type_exists( 'et_template' ) ) {
+			return new \WP_Error( 'no_theme_builder', 'The Divi Theme Builder isn’t available on this site.', [ 'status' => 409 ] );
+		}
+		$body  = (array) $request->get_json_params();
+		$areas = [];
+		foreach ( [ 'header', 'footer' ] as $area ) {
+			if ( isset( $body[ $area ] ) ) {
+				$content = (string) $body[ $area ];
+				if ( false === strpos( $content, '<!-- wp:divi/' ) ) {
+					return new \WP_Error( 'not_divi_content', "The {$area} must be Divi 5 block markup.", [ 'status' => 400 ] );
+				}
+				$areas[ $area ] = $content;
+			}
+		}
+		if ( ! $areas ) {
+			return new \WP_Error( 'missing_content', 'Send a header, a footer or both.', [ 'status' => 400 ] );
+		}
+
+		$builder  = self::theme_builder_id( true );
+		$template = self::default_template_id( $builder );
+		foreach ( $areas as $area => $content ) {
+			$expected = (string) ( $body[ "expected_{$area}_modified" ] ?? '' );
+			$post     = self::area_layout( $template, $area );
+			if ( $post && $expected && mysql_to_rfc3339( $post->post_modified_gmt ) !== $expected ) {
+				return new \WP_Error( 'changed', "The site's {$area} was edited in the Theme Builder after the change was drafted.", [ 'status' => 409 ] );
+			}
+		}
+		if ( ! $builder ) {
+			return new \WP_Error( 'no_theme_builder', 'Couldn’t start the Theme Builder on this site.', [ 'status' => 500 ] );
+		}
+		if ( ! $template ) {
+			$made = wp_insert_post( [ 'post_type' => 'et_template', 'post_status' => 'publish', 'post_title' => 'Default Website Template' ], true );
+			if ( is_wp_error( $made ) ) {
+				return $made;
+			}
+			$template = (int) $made;
+			update_post_meta( $template, '_et_default', '1' );
+			update_post_meta( $template, '_et_enabled', '1' );
+			foreach ( [ 'header', 'body', 'footer' ] as $area ) {
+				update_post_meta( $template, "_et_{$area}_layout_id", '0' );
+				update_post_meta( $template, "_et_{$area}_layout_enabled", '1' );
+			}
+			add_post_meta( $builder, '_et_template', $template );
+		}
+
+		foreach ( $areas as $area => $content ) {
+			$post = self::area_layout( $template, $area );
+			if ( $post ) {
+				$result = wp_update_post( [ 'ID' => $post->ID, 'post_content' => wp_slash( $content ) ], true );
+				$id     = $post->ID;
+			} else {
+				$result = wp_insert_post( [
+					'post_type'    => "et_{$area}_layout",
+					'post_status'  => 'publish',
+					'post_title'   => 'Site ' . ucfirst( $area ),
+					'post_content' => wp_slash( $content ),
+				], true );
+				$id = is_wp_error( $result ) ? 0 : (int) $result;
+			}
+			if ( is_wp_error( $result ) ) {
+				return $result;
+			}
+			update_post_meta( $id, '_et_pb_use_builder', 'on' );
+			update_post_meta( $id, '_et_pb_use_divi_5', 'on' );
+			update_post_meta( $template, "_et_{$area}_layout_id", (string) $id );
+			update_post_meta( $template, "_et_{$area}_layout_enabled", '1' );
+		}
+		if ( function_exists( 'et_theme_builder_clear_wp_cache' ) ) {
+			et_theme_builder_clear_wp_cache( 'all' );
+		}
+		self::clear_css( 'all' );
+
+		return new \WP_REST_Response( self::site_template_values(), 200 );
 	}
 
 	// -------------------------------------------------------------------------
