@@ -17,6 +17,9 @@
  *   POST /divi/layouts/{id}              Replace its content ({ content, expected_modified })
  *   GET  /divi/identity                  The site's identity: title, tagline, logo, header phone and email, footer credits, accent color
  *   POST /divi/identity                  Change any of those ({ site_title, tagline, logo, phone, email, footer_credits, accent_color })
+ *   POST /divi/validate                  Check Divi 5 block markup before it's saved ({ content, post_id? })
+ *   GET  /divi/design                    The design system: global colors, fonts, variables and presets
+ *   POST /divi/design                    Add or change global colors, fonts and module presets ({ colors, fonts, presets })
  *
  * Callers sign in as a WordPress user who can edit pages (an application
  * password), or with the plugin's API key.
@@ -93,6 +96,23 @@ class Divi {
 			[
 				'methods'             => 'POST',
 				'callback'            => [ $this, 'update_identity' ],
+				'permission_callback' => [ $this, 'can_edit_identity' ],
+			],
+		] );
+		register_rest_route( $ns, '/divi/validate', [
+			'methods'             => 'POST',
+			'callback'            => [ $this, 'validate' ],
+			'permission_callback' => [ $this, 'can_edit' ],
+		] );
+		register_rest_route( $ns, '/divi/design', [
+			[
+				'methods'             => 'GET',
+				'callback'            => [ $this, 'design' ],
+				'permission_callback' => [ $this, 'can_edit' ],
+			],
+			[
+				'methods'             => 'POST',
+				'callback'            => [ $this, 'update_design' ],
 				'permission_callback' => [ $this, 'can_edit_identity' ],
 			],
 		] );
@@ -330,6 +350,590 @@ class Divi {
 		self::clear_css( 'all' );
 
 		return new \WP_REST_Response( self::identity_values(), 200 );
+	}
+
+	// -------------------------------------------------------------------------
+	// Checking Divi 5 markup before it's saved
+	//
+	// Divi stores almost any block markup without complaint, then renders some
+	// of it wrong or not at all. This catches that before a person approves it:
+	// broken block comments and settings, modules this site doesn't have,
+	// global colors and presets that don't exist, settings in places Divi never
+	// reads, and anything that fails to render. The module rules follow the
+	// DiviOps Agent plugin's validator (GPL-2.0-or-later, github.com/oaris-dev/diviops).
+
+	/** WordPress's block comment pattern, as in WP_Block_Parser. */
+	const BLOCK_TOKEN = '/<!--\s+(?P<closer>\/)?wp:(?P<namespace>[a-z][a-z0-9_-]*\/)?(?P<name>[a-z][a-z0-9_-]*)\s+(?P<attrs>{(?:(?:[^}]+|}+(?=})|(?!}\s+\/?-->).)*+)}\s+)?(?P<void>\/)?-->/s';
+
+	/** At most this many problems are listed; the rest are counted. */
+	const MAX_PROBLEMS = 40;
+
+	public function validate( \WP_REST_Request $request ) {
+		$body    = (array) $request->get_json_params();
+		$content = isset( $body['content'] ) ? (string) $body['content'] : '';
+		if ( '' === trim( $content ) ) {
+			return new \WP_Error( 'missing_content', 'content is required.', [ 'status' => 400 ] );
+		}
+		$post_id = isset( $body['post_id'] ) ? (int) $body['post_id'] : 0;
+		if ( $post_id && is_user_logged_in() && ! current_user_can( 'edit_post', $post_id ) ) {
+			$post_id = 0;
+		}
+		return new \WP_REST_Response( self::check_markup( $content, $post_id ), 200 );
+	}
+
+	private static function note( array &$report, string $level, string $code, string $message, string $block = '', int $index = 0 ) : void {
+		if ( count( $report['errors'] ) + count( $report['warnings'] ) >= self::MAX_PROBLEMS ) {
+			$report['more']++;
+			return;
+		}
+		$item = [ 'code' => $code, 'message' => $message ];
+		if ( '' !== $block ) {
+			$item['block'] = $block;
+		}
+		if ( $index ) {
+			$item['number'] = $index;
+		}
+		$report[ $level ][] = $item;
+	}
+
+	/** A value deep in a block's settings, or null. */
+	private static function dig( $value, array $path ) {
+		foreach ( $path as $key ) {
+			if ( ! is_array( $value ) || ! array_key_exists( $key, $value ) ) {
+				return null;
+			}
+			$value = $value[ $key ];
+		}
+		return $value;
+	}
+
+	/** Whether this site has Divi 5's modules (registered as divi/* blocks). */
+	private static function divi5_blocks() : array {
+		$names = [];
+		foreach ( array_keys( \WP_Block_Type_Registry::get_instance()->get_all_registered() ) as $name ) {
+			if ( 0 === strpos( $name, 'divi/' ) ) {
+				$names[ $name ] = true;
+			}
+		}
+		return $names;
+	}
+
+	public static function check_markup( string $content, int $post_id = 0 ) : array {
+		$report = [ 'errors' => [], 'warnings' => [], 'more' => 0 ];
+		$known  = self::divi5_blocks();
+
+		// 1. The block comments themselves: settings that are valid JSON, and
+		//    every module closed in the order it was opened.
+		preg_match_all( self::BLOCK_TOKEN, $content, $tokens, PREG_SET_ORDER );
+		$stack  = [];
+		$number = 0;
+		foreach ( $tokens as $t ) {
+			$name   = ( ( $t['namespace'] ?? '' ) ?: 'core/' ) . $t['name'];
+			$closer = '' !== ( $t['closer'] ?? '' );
+			if ( $closer ) {
+				$open = array_pop( $stack );
+				if ( null === $open ) {
+					self::note( $report, 'errors', 'unopened', "{$name} is closed but was never opened.", $name );
+				} elseif ( $open !== $name ) {
+					self::note( $report, 'errors', 'mismatched', "{$open} is closed as {$name}: the modules are closed in the wrong order, or one is missing its closing comment.", $open );
+					$stack = [];
+					break;
+				}
+				continue;
+			}
+			$number++;
+			$attrs = trim( (string) ( $t['attrs'] ?? '' ) );
+			if ( '' !== $attrs && null === json_decode( $attrs, true ) ) {
+				self::note( $report, 'errors', 'bad_settings', "The settings of {$name} (block {$number}) aren't valid JSON: " . json_last_error_msg() . '.', $name, $number );
+			}
+			if ( '' === ( $t['void'] ?? '' ) ) {
+				$stack[] = $name;
+			}
+		}
+		foreach ( array_reverse( $stack ) as $open ) {
+			self::note( $report, 'errors', 'unclosed', "{$open} is never closed.", $open );
+		}
+		if ( preg_match( '/(?<!\\\\)u00(22|3c|3e|26)/i', $content ) ) {
+			self::note( $report, 'errors', 'lost_escapes', 'The markup has \\u0022-style escapes that lost their backslash (e.g. "u0022"), so quotes and tags would show as text. Write them as \\u0022, or as plain characters.' );
+		}
+
+		// 2. Each module: one this site has, and settings where Divi reads them.
+		$blocks  = parse_blocks( $content );
+		$counts  = [];
+		$design  = self::design_values( false );
+		$index   = 0;
+		$walk    = function ( array $blocks ) use ( &$walk, &$report, &$counts, &$index, $known, $design ) {
+			foreach ( $blocks as $block ) {
+				$name = $block['blockName'] ?? null;
+				if ( null === $name ) {
+					if ( '' !== trim( wp_strip_all_tags( (string) ( $block['innerHTML'] ?? '' ) ) ) ) {
+						self::note( $report, 'warnings', 'loose_content', 'There is text or HTML outside any module. Divi\'s builder won\'t show it; put it in a Text module.' );
+					}
+					continue;
+				}
+				$index++;
+				$counts[ $name ] = ( $counts[ $name ] ?? 0 ) + 1;
+				if ( 0 === strpos( $name, 'divi/' ) && $known && ! isset( $known[ $name ] ) ) {
+					self::note( $report, 'errors', 'unknown_module', "{$name} isn't a Divi module on this site.", $name, $index );
+				}
+				self::check_module( $name, is_array( $block['attrs'] ?? null ) ? $block['attrs'] : [], $index, $report, $design );
+				$walk( (array) ( $block['innerBlocks'] ?? [] ) );
+			}
+		};
+		$walk( $blocks );
+		if ( ! $known && preg_grep( '/^divi\//', array_keys( $counts ) ) ) {
+			self::note( $report, 'warnings', 'no_divi5', 'Divi 5 isn\'t active on this site, so only the markup\'s shape was checked.' );
+		}
+
+		// 3. Global colors and variables it names that the site doesn't have.
+		if ( $design['divi5'] ) {
+			$colors    = array_flip( array_column( $design['colors'], 'id' ) );
+			$variables = array_flip( array_column( $design['variables'], 'id' ) );
+			preg_match_all( '/\b(gcid|gvid)-[0-9a-z_-]+/', $content, $refs );
+			foreach ( array_unique( $refs[0] ) as $ref ) {
+				if ( 0 === strpos( $ref, 'gcid-' ) && ! isset( $colors[ $ref ] ) ) {
+					self::note( $report, 'errors', 'unknown_color', "It uses the global color {$ref}, which this site doesn't have, so it would show no color. Use one of the site's global colors, or a hex value." );
+				} elseif ( 0 === strpos( $ref, 'gvid-' ) && ! isset( $variables[ $ref ] ) ) {
+					self::note( $report, 'warnings', 'unknown_variable', "It uses the global variable {$ref}, which isn't in this site's Variable Manager." );
+				}
+			}
+		}
+
+		// 4. Render it, as the page would be, when nothing above is broken.
+		$rendered = false;
+		if ( ! $report['errors'] && $known ) {
+			$notices  = [];
+			$previous = $GLOBALS['post'] ?? null;
+			$post     = $post_id ? get_post( $post_id ) : null;
+			if ( $post ) {
+				$GLOBALS['post'] = $post; // phpcs:ignore WordPress.WP.GlobalVariablesOverride
+				setup_postdata( $post );
+			}
+			set_error_handler( function ( $no, $message ) use ( &$notices ) { // phpcs:ignore WordPress.PHP.DevelopmentFunctions
+				$notices[] = $message;
+				return true;
+			}, E_WARNING | E_NOTICE | E_USER_WARNING | E_USER_NOTICE );
+			ob_start();
+			try {
+				$html     = do_blocks( $content );
+				$rendered = true;
+				if ( '' === trim( wp_strip_all_tags( $html ) ) && false === stripos( $html, '<img' ) ) {
+					self::note( $report, 'warnings', 'renders_empty', 'It renders with no text or images.' );
+				}
+			} catch ( \Throwable $e ) {
+				self::note( $report, 'errors', 'render_failed', 'Divi couldn\'t render it: ' . mb_substr( $e->getMessage(), 0, 400 ) );
+			} finally {
+				ob_end_clean();
+				restore_error_handler();
+				$GLOBALS['post'] = $previous; // phpcs:ignore WordPress.WP.GlobalVariablesOverride
+				if ( $post ) {
+					wp_reset_postdata();
+				}
+			}
+			foreach ( array_slice( array_unique( $notices ), 0, 5 ) as $message ) {
+				self::note( $report, 'warnings', 'render_notice', 'While rendering: ' . mb_substr( (string) $message, 0, 300 ) );
+			}
+		}
+
+		ksort( $counts );
+		return [
+			'valid'    => ! $report['errors'],
+			'errors'   => $report['errors'],
+			'warnings' => $report['warnings'],
+			'more'     => $report['more'],
+			'modules'  => $counts,
+			'rendered' => $rendered,
+		];
+	}
+
+	/** Settings Divi stores but never reads, or reads differently, per module. */
+	private static function check_module( string $name, array $attrs, int $i, array &$report, array $design ) : void {
+		if ( 0 !== strpos( $name, 'divi/' ) ) {
+			return;
+		}
+		$e = function ( string $code, string $message ) use ( &$report, $name, $i ) {
+			self::note( $report, 'errors', $code, $message, $name, $i );
+		};
+		$w = function ( string $code, string $message ) use ( &$report, $name, $i ) {
+			self::note( $report, 'warnings', $code, $message, $name, $i );
+		};
+
+		if ( 'divi/placeholder' !== $name && ! isset( $attrs['builderVersion'] ) ) {
+			$w( 'no_builder_version', 'It has no builderVersion; copy the one the page\'s other modules use.' );
+		}
+
+		switch ( $name ) {
+			case 'divi/text':
+				if ( ! self::dig( $attrs, [ 'content', 'innerContent', 'desktop', 'value' ] ) ) {
+					$e( 'empty_text', 'The Text module has no content.innerContent.desktop.value, so it renders as nothing.' );
+				}
+				break;
+			case 'divi/heading':
+				if ( null === self::dig( $attrs, [ 'title', 'decoration', 'font', 'font', 'desktop', 'value', 'headingLevel' ] ) ) {
+					$w( 'no_heading_level', 'The Heading has no headingLevel (title.decoration.font.font.desktop.value.headingLevel), so it\'s an h2. Set h1 to h6 to match the outline.' );
+				}
+				break;
+			case 'divi/button':
+				$text = self::dig( $attrs, [ 'button', 'innerContent', 'desktop', 'value' ] );
+				if ( is_string( $text ) ) {
+					$e( 'button_text_string', 'button.innerContent.desktop.value must be an object like {"text":"Call now","linkUrl":"..."}; a plain string renders an empty button.' );
+				}
+				if ( null === $text && null !== self::dig( $attrs, [ 'content', 'innerContent', 'desktop', 'value' ] ) ) {
+					$e( 'button_text_wrong_place', 'The Button\'s text is in content.innerContent, but Divi reads button.innerContent, so it would say "Click Me" and link nowhere.' );
+				}
+				if ( null !== self::dig( $attrs, [ 'button', 'decoration', 'spacing' ] ) ) {
+					$w( 'button_padding_wrong_place', 'Button padding belongs in module.decoration.spacing, not button.decoration.spacing.' );
+				}
+				break;
+			case 'divi/blurb':
+				if ( is_string( self::dig( $attrs, [ 'title', 'innerContent', 'desktop', 'value' ] ) ) ) {
+					$e( 'blurb_title_string', 'The Blurb\'s title.innerContent.desktop.value must be an object like {"text":"..."}; a plain string renders an empty title.' );
+				}
+				$icon = self::dig( $attrs, [ 'imageIcon', 'innerContent', 'desktop', 'value' ] );
+				if ( is_array( $icon ) && isset( $icon['icon'] ) && 'on' !== ( $icon['useIcon'] ?? null ) ) {
+					$e( 'blurb_icon_off', 'The Blurb has an icon but useIcon isn\'t "on", so the icon won\'t show.' );
+				}
+				break;
+			case 'divi/contact-field':
+				foreach ( (array) self::dig( $attrs, [ 'fieldItem', 'innerContent' ] ) as $breakpoint => $states ) {
+					foreach ( is_array( $states ) ? $states : [] as $state => $value ) {
+						if ( null !== $value && ! is_string( $value ) ) {
+							$e( 'field_label_not_text', "fieldItem.innerContent.{$breakpoint}.{$state} must be the label text; anything else stops the whole page rendering. Put the field's id, type and required in fieldItem.advanced.<setting>.desktop.value." );
+						}
+					}
+				}
+				break;
+			case 'divi/code':
+			case 'divi/fullwidth-code':
+				$w( 'code_module', 'A Code module can\'t be edited in the builder. Use Divi\'s own modules where you can.' );
+				break;
+		}
+
+		if ( null !== self::dig( $attrs, [ 'content', 'decoration', 'bodyFont', 'bodyFont' ] ) ) {
+			$e( 'body_font_wrong_place', 'content.decoration.bodyFont.bodyFont is never read, so its fonts and colors are lost. Use content.decoration.bodyFont.body.font.' );
+		}
+		if ( ! in_array( $name, [ 'divi/column', 'divi/column-inner' ], true ) && null !== self::dig( $attrs, [ 'module', 'decoration', 'layout', 'desktop', 'value', 'flexType' ] ) ) {
+			$w( 'flex_type_ignored', 'flexType in module.decoration.layout only sizes columns. For other modules use module.decoration.sizing.desktop.value.width.' );
+		}
+		foreach ( [ 'module', 'button' ] as $part ) {
+			$gradient = self::dig( $attrs, [ $part, 'decoration', 'background', 'desktop', 'value', 'gradient' ] );
+			if ( is_array( $gradient ) && 'on' !== ( $gradient['enabled'] ?? null ) ) {
+				$w( 'gradient_off', "The gradient in {$part}.decoration.background has no enabled:\"on\", so it won't show." );
+			}
+		}
+		foreach ( [ 'module', 'button', 'icon' ] as $part ) {
+			foreach ( [ 'background', 'border', 'boxShadow' ] as $prop ) {
+				$value = self::dig( $attrs, [ $part, 'decoration', $prop ] );
+				if ( is_array( $value ) && isset( $value['hover'] ) && ! isset( $value['desktop']['hover'] ) ) {
+					$w( 'hover_wrong_place', "The hover style in {$part}.decoration.{$prop}.hover is ignored; put it in {$part}.decoration.{$prop}.desktop.hover." );
+				}
+			}
+		}
+
+		// Presets it names that the site doesn't have: their styling would be missing.
+		if ( $design['divi5'] ) {
+			$ids = [];
+			foreach ( $design['presets'] as $preset ) {
+				$ids[ $preset['id'] ] = true;
+			}
+			$module_presets = $attrs['modulePreset'] ?? [];
+			foreach ( (array) $module_presets as $id ) {
+				if ( is_string( $id ) && '' !== $id && 'default' !== $id && ! isset( $ids[ $id ] ) ) {
+					$e( 'unknown_preset', "It uses the preset {$id}, which this site doesn't have." );
+				}
+			}
+			foreach ( (array) ( $attrs['groupPreset'] ?? [] ) as $group ) {
+				foreach ( (array) ( is_array( $group ) ? ( $group['presetId'] ?? [] ) : [] ) as $id ) {
+					if ( is_string( $id ) && '' !== $id && 'default' !== $id && ! isset( $ids[ $id ] ) ) {
+						$e( 'unknown_preset', "It uses the option group preset {$id}, which this site doesn't have." );
+					}
+				}
+			}
+		}
+	}
+
+	// -------------------------------------------------------------------------
+	// The design system: global colors, fonts, variables and presets
+	//
+	// Divi 5 keeps global colors in the et_global_data theme option, the
+	// colors and fonts bound to Theme Options (primary color, heading font...)
+	// in their own theme options, other global variables in
+	// et_divi_global_variables, and presets in et_divi_builder_global_presets_d5.
+
+	const PRESETS_OPTION   = 'et_divi_builder_global_presets_d5';
+	const VARIABLES_OPTION = 'et_divi_global_variables';
+
+	private static function as_array( $value ) : array {
+		$value = maybe_unserialize( $value );
+		if ( is_object( $value ) ) {
+			$value = json_decode( (string) wp_json_encode( $value ), true );
+		}
+		return is_array( $value ) ? $value : [];
+	}
+
+	private static function raw_theme_option( string $key ) {
+		if ( function_exists( 'et_get_option' ) ) {
+			return et_get_option( $key, '' );
+		}
+		$options = (array) get_option( 'et_divi', [] );
+		return $options[ $key ] ?? '';
+	}
+
+	/** The global colors bound to Theme Options: id => [ label, option, default ]. */
+	private static function theme_colors() : array {
+		$class = '\ET\Builder\Packages\GlobalData\GlobalData';
+		if ( ! class_exists( $class ) || ! property_exists( $class, 'customizer_colors' ) ) {
+			return [];
+		}
+		$colors = [];
+		foreach ( (array) $class::$customizer_colors as $id => $meta ) {
+			if ( is_string( $id ) && is_array( $meta ) ) {
+				$colors[ $id ] = [
+					'label'   => (string) ( $meta['label'] ?? $id ),
+					'option'  => (string) ( $meta['option_name'] ?? '' ),
+					'default' => (string) ( $meta['default'] ?? '' ),
+				];
+			}
+		}
+		return $colors;
+	}
+
+	private static function preset_registry() : array {
+		$registry = self::as_array( get_option( self::PRESETS_OPTION, [] ) );
+		return $registry ?: self::as_array( self::raw_theme_option( 'builder_global_presets_d5' ) );
+	}
+
+	private static function design_values( bool $with_attrs = true ) : array {
+		$colors = [];
+		foreach ( self::theme_colors() as $id => $meta ) {
+			$value    = '' !== $meta['option'] ? (string) self::raw_theme_option( $meta['option'] ) : '';
+			$colors[] = [ 'id' => $id, 'label' => $meta['label'], 'color' => '' !== $value ? $value : $meta['default'], 'theme_option' => true ];
+		}
+		$global = self::as_array( self::raw_theme_option( 'et_global_data' ) );
+		foreach ( self::as_array( $global['global_colors'] ?? [] ) as $id => $c ) {
+			if ( is_array( $c ) && 'archived' !== ( $c['status'] ?? '' ) ) {
+				$colors[] = [ 'id' => (string) $id, 'label' => (string) ( $c['label'] ?? '' ), 'color' => (string) ( $c['color'] ?? '' ) ];
+			}
+		}
+
+		$variables = [];
+		foreach ( self::as_array( get_option( self::VARIABLES_OPTION, [] ) ) as $type => $items ) {
+			foreach ( is_array( $items ) ? $items : [] as $id => $v ) {
+				if ( is_array( $v ) ) {
+					$variables[] = [ 'id' => (string) $id, 'type' => (string) $type, 'label' => (string) ( $v['label'] ?? $id ), 'value' => $v['value'] ?? '' ];
+				}
+			}
+		}
+
+		$presets = [];
+		foreach ( [ 'module', 'group' ] as $kind ) {
+			foreach ( self::as_array( self::preset_registry()[ $kind ] ?? [] ) as $key => $bucket ) {
+				$bucket = self::as_array( $bucket );
+				foreach ( self::as_array( $bucket['items'] ?? [] ) as $id => $p ) {
+					$p    = self::as_array( $p );
+					$item = [
+						'id'      => (string) $id,
+						'kind'    => $kind,
+						( 'module' === $kind ? 'module' : 'group' ) => (string) $key,
+						'name'    => (string) ( $p['name'] ?? '' ),
+						'default' => (string) ( $bucket['default'] ?? '' ) === (string) $id,
+					];
+					if ( 'group' === $kind ) {
+						$item['group_id'] = (string) ( $p['groupId'] ?? '' );
+					}
+					if ( $with_attrs ) {
+						$item['attrs'] = $p['attrs'] ?? (object) [];
+					}
+					$presets[] = $item;
+				}
+			}
+		}
+
+		return [
+			'divi5'     => (bool) self::divi5_blocks(),
+			'colors'    => $colors,
+			'fonts'     => [
+				'heading' => (string) self::raw_theme_option( 'heading_font' ),
+				'body'    => (string) self::raw_theme_option( 'body_font' ),
+			],
+			'variables' => $variables,
+			'presets'   => $presets,
+		];
+	}
+
+	public function design() {
+		if ( null === self::version() ) {
+			return new \WP_Error( 'no_divi', 'Divi isn’t active on this site.', [ 'status' => 409 ] );
+		}
+		return new \WP_REST_Response( self::design_values(), 200 );
+	}
+
+	private static function valid_color( $color ) : bool {
+		return is_string( $color ) && (
+			1 === preg_match( '/^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i', $color )
+			|| 1 === preg_match( '/^(rgba?|hsla?)\(\s*[0-9.,%\s\/]+\)$/i', $color )
+		);
+	}
+
+	/**
+	 * Adds or changes global colors ({ id?, label, color }; an id of a color
+	 * bound to Theme Options, like gcid-primary-color, changes that option),
+	 * the heading and body fonts ({ heading, body }), and module presets
+	 * ({ module, name, attrs, id?, default? }; a preset with that id, or with
+	 * no id and the same name on that module, is updated; a new id is used for
+	 * a new preset). Everything is checked before anything is saved.
+	 */
+	public function update_design( \WP_REST_Request $request ) {
+		if ( null === self::version() || ! self::divi5_blocks() ) {
+			return new \WP_Error( 'no_divi5', 'Divi 5 isn’t active on this site.', [ 'status' => 409 ] );
+		}
+		$body    = (array) $request->get_json_params();
+		$bad     = function ( string $message ) {
+			return new \WP_Error( 'invalid_design', $message, [ 'status' => 400 ] );
+		};
+		$now_iso = gmdate( 'Y-m-d\TH:i:s.000\Z' );
+		$now_ms  = (int) round( microtime( true ) * 1000 );
+		$made    = [];
+
+		// Colors.
+		$theme_colors  = self::theme_colors();
+		$theme_changes = [];
+		$global        = self::as_array( self::raw_theme_option( 'et_global_data' ) );
+		$palette       = self::as_array( $global['global_colors'] ?? [] );
+		$palette_dirty = false;
+		foreach ( (array) ( $body['colors'] ?? [] ) as $n => $c ) {
+			$c     = (array) $c;
+			$color = trim( (string) ( $c['color'] ?? '' ) );
+			$label = sanitize_text_field( (string) ( $c['label'] ?? '' ) );
+			$id    = sanitize_text_field( (string) ( $c['id'] ?? '' ) );
+			if ( ! self::valid_color( $color ) ) {
+				return $bad( "colors[{$n}]: the color must be a hex value like #1f6feb, or rgba()." );
+			}
+			if ( '' !== $id && isset( $theme_colors[ $id ] ) ) {
+				if ( '' === $theme_colors[ $id ]['option'] ) {
+					return $bad( "colors[{$n}]: {$id} can only be changed in Theme Options." );
+				}
+				$theme_changes[ $theme_colors[ $id ]['option'] ] = $color;
+				$made[] = [ 'kind' => 'color', 'id' => $id, 'label' => $theme_colors[ $id ]['label'] ];
+				continue;
+			}
+			if ( '' === $id ) {
+				if ( '' === $label ) {
+					return $bad( "colors[{$n}]: a new color needs a label." );
+				}
+				foreach ( $palette as $existing_id => $existing ) {
+					if ( is_array( $existing ) && ( $existing['label'] ?? '' ) === $label ) {
+						$id = (string) $existing_id;
+					}
+				}
+				if ( '' === $id ) {
+					$base = 'gcid-' . substr( trim( preg_replace( '/[^0-9a-z-]+/', '-', strtolower( remove_accents( $label ) ) ), '-' ) ?: 'color', 0, 60 );
+					$id   = $base;
+					for ( $k = 2; isset( $palette[ $id ] ) || isset( $theme_colors[ $id ] ); $k++ ) {
+						$id = "{$base}-{$k}";
+					}
+				}
+			} elseif ( ! preg_match( '/^gcid-[0-9a-z-]{1,80}$/', $id ) ) {
+				return $bad( "colors[{$n}]: a global color's id looks like gcid-brand-navy." );
+			}
+			$old            = self::as_array( $palette[ $id ] ?? [] );
+			$palette[ $id ] = [
+				'color'       => $color,
+				'folder'      => (string) ( $old['folder'] ?? '' ),
+				'label'       => '' !== $label ? $label : (string) ( $old['label'] ?? $id ),
+				'lastUpdated' => $now_iso,
+				'status'      => 'active',
+				'usedInPosts' => is_array( $old['usedInPosts'] ?? null ) ? $old['usedInPosts'] : [],
+			];
+			$palette_dirty  = true;
+			$made[]         = [ 'kind' => 'color', 'id' => $id, 'label' => $palette[ $id ]['label'] ];
+		}
+
+		// Fonts.
+		$fonts = [];
+		foreach ( [ 'heading', 'body' ] as $which ) {
+			if ( isset( $body['fonts'][ $which ] ) ) {
+				$font = sanitize_text_field( (string) $body['fonts'][ $which ] );
+				if ( '' === $font || strlen( $font ) > 80 ) {
+					return $bad( "fonts.{$which}: give a font family's name, like Poppins." );
+				}
+				$fonts[ "{$which}_font" ] = $font;
+			}
+		}
+
+		// Module presets.
+		$registry      = self::preset_registry();
+		$presets_dirty = false;
+		$modules       = self::divi5_blocks();
+		foreach ( (array) ( $body['presets'] ?? [] ) as $n => $p ) {
+			$p      = (array) $p;
+			$module = sanitize_text_field( (string) ( $p['module'] ?? '' ) );
+			$name   = sanitize_text_field( (string) ( $p['name'] ?? '' ) );
+			$attrs  = $p['attrs'] ?? null;
+			if ( ! isset( $modules[ $module ] ) ) {
+				return $bad( "presets[{$n}]: {$module} isn't a Divi module on this site." );
+			}
+			if ( '' === $name || ! is_array( $attrs ) || ! $attrs ) {
+				return $bad( "presets[{$n}]: a preset needs a name and its attrs (the module's settings, as in its block)." );
+			}
+			$bucket          = self::as_array( $registry['module'][ $module ] ?? [] );
+			$bucket['items'] = self::as_array( $bucket['items'] ?? [] );
+			$id              = sanitize_text_field( (string) ( $p['id'] ?? '' ) );
+			// A new preset can come with its id, so pages can use it before it's saved.
+			if ( '' !== $id && ! isset( $bucket['items'][ $id ] ) && ! preg_match( '/^[0-9a-z][0-9a-z-]{7,63}$/', $id ) ) {
+				return $bad( "presets[{$n}]: a preset's id is a lowercase UUID." );
+			}
+			if ( '' === $id ) {
+				foreach ( $bucket['items'] as $existing_id => $existing ) {
+					if ( ( self::as_array( $existing )['name'] ?? '' ) === $name ) {
+						$id = (string) $existing_id;
+					}
+				}
+			}
+			$old    = '' !== $id ? self::as_array( $bucket['items'][ $id ] ) : [];
+			$id     = '' !== $id ? $id : wp_generate_uuid4();
+			$preset = array_merge( $old, [
+				'id'          => $id,
+				'name'        => $name,
+				'moduleName'  => $module,
+				'type'        => 'module',
+				// Divi reads all three; keeping them equal keeps its two CSS passes in step.
+				'attrs'       => $attrs,
+				'styleAttrs'  => $attrs,
+				'renderAttrs' => $attrs,
+				'created'     => $old['created'] ?? $now_ms,
+				'updated'     => $now_ms,
+				'version'     => (string) ( defined( 'ET_BUILDER_VERSION' ) ? ET_BUILDER_VERSION : self::version() ),
+			] );
+			$bucket['items'][ $id ] = $preset;
+			$bucket['default']      = ! empty( $p['default'] ) ? $id : (string) ( $bucket['default'] ?? '' );
+			$registry['module']             = self::as_array( $registry['module'] ?? [] );
+			$registry['module'][ $module ]  = $bucket;
+			$registry['group']              = $registry['group'] ?? [];
+			$presets_dirty                  = true;
+			$made[] = [ 'kind' => 'preset', 'id' => $id, 'module' => $module, 'name' => $name, 'default' => $bucket['default'] === $id ];
+		}
+
+		if ( ! $made && ! $fonts ) {
+			return $bad( 'Nothing to change: send colors, fonts or presets.' );
+		}
+
+		foreach ( $theme_changes as $option => $color ) {
+			self::set_theme_option( $option, $color );
+		}
+		if ( $palette_dirty ) {
+			$global['global_colors'] = $palette;
+			self::set_theme_option( 'et_global_data', $global );
+		}
+		foreach ( $fonts as $option => $font ) {
+			self::set_theme_option( $option, $font );
+		}
+		if ( $presets_dirty ) {
+			update_option( self::PRESETS_OPTION, $registry, false );
+		}
+		self::clear_css( 'all' );
+
+		return new \WP_REST_Response( array_merge( [ 'changed' => $made ], self::design_values() ), 200 );
 	}
 
 	// -------------------------------------------------------------------------
