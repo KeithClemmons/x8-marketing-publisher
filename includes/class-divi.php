@@ -653,6 +653,9 @@ class Divi {
 	/** WordPress's block comment pattern, as in WP_Block_Parser. */
 	const BLOCK_TOKEN = '/<!--\s+(?P<closer>\/)?wp:(?P<namespace>[a-z][a-z0-9_-]*\/)?(?P<name>[a-z][a-z0-9_-]*)\s+(?P<attrs>{(?:(?:[^}]+|}+(?=})|(?!}\s+\/?-->).)*+)}\s+)?(?P<void>\/)?-->/s';
 
+	/** Divi 5 structure that isn't a registered module: the page wrapper, and layout references. */
+	const WRAPPERS = [ 'divi/placeholder', 'divi/layout', 'divi/global-layout' ];
+
 	/** At most this many problems are listed; the rest are counted. */
 	const MAX_PROBLEMS = 40;
 
@@ -763,7 +766,7 @@ class Divi {
 				$index++;
 				$counts[ $name ] = ( $counts[ $name ] ?? 0 ) + 1;
 				// Modules from Divi or an add-on (e.g. Divi Supreme) that this site doesn't have render as nothing.
-				if ( $known && 0 !== strpos( $name, 'core/' ) && ! $registry->is_registered( $name ) ) {
+				if ( $known && 0 !== strpos( $name, 'core/' ) && ! in_array( $name, self::WRAPPERS, true ) && ! $registry->is_registered( $name ) ) {
 					self::note( $report, 'errors', 'unknown_module', "{$name} isn't a module on this site (is the plugin that provides it active?).", $name, $index );
 				}
 				$attrs = is_array( $block['attrs'] ?? null ) ? $block['attrs'] : [];
