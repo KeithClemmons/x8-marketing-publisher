@@ -19,7 +19,7 @@
  *   POST /divi/identity                  Change any of those ({ site_title, tagline, logo, logo_height, phone, email, footer_credits, accent_color })
  *   GET  /divi/site-template             The header and footer every page gets (Theme Builder), and the site's menus
  *   POST /divi/site-template             Set them ({ header, footer, expected_header_modified, expected_footer_modified })
- *   POST /divi/preview                   A private page showing Divi markup as it will look ({ content, header, footer, title }), by a link with a token
+ *   POST /divi/preview                   A private page showing Divi markup as it will look ({ content, header, footer, title, images }), by a link with a token
  *   POST /divi/validate                  Check Divi 5 block markup before it's saved ({ content, post_id? })
  *   GET  /divi/design                    The design system: global colors, fonts, variables and presets
  *   POST /divi/design                    Add or change global colors, fonts, variables and module presets ({ colors, fonts, variables, presets })
@@ -580,6 +580,62 @@ class Divi {
 		}
 	}
 
+	const PREVIEW_IMAGE_TYPES = [ 'image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif' ];
+
+	private static function preview_dir( string $token ) : array {
+		$uploads = wp_upload_dir();
+		$name    = 'x8-preview/' . preg_replace( '/[^A-Za-z0-9]/', '', $token );
+		return [ trailingslashit( $uploads['basedir'] ) . $name, trailingslashit( $uploads['baseurl'] ) . $name ];
+	}
+
+	/**
+	 * Saves a preview's images ({ ref: { data: base64, type } }), checked to be
+	 * real images, and returns each one's address by its ref.
+	 *
+	 * @return array<string,string>|\WP_Error
+	 */
+	private static function save_preview_images( string $token, array $images ) {
+		if ( count( $images ) > 16 ) {
+			return new \WP_Error( 'too_many_images', 'A preview can carry at most 16 images.', [ 'status' => 400 ] );
+		}
+		if ( ! $images ) {
+			return [];
+		}
+		[ $dir, $url ] = self::preview_dir( $token );
+		if ( ! wp_mkdir_p( $dir ) ) {
+			return new \WP_Error( 'no_upload_dir', 'Couldn’t make a folder for the preview’s images in the uploads folder.', [ 'status' => 500 ] );
+		}
+		$saved = [];
+		foreach ( $images as $ref => $image ) {
+			$ref  = preg_replace( '/[^A-Za-z0-9-]/', '', (string) $ref );
+			$data = base64_decode( (string) ( ( (array) $image )['data'] ?? '' ), true );
+			$info = false !== $data && strlen( $data ) <= 6 * MB_IN_BYTES ? @getimagesizefromstring( $data ) : false; // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$ext  = $info ? ( self::PREVIEW_IMAGE_TYPES[ $info['mime'] ] ?? null ) : null;
+			if ( '' === $ref || ! $ext ) {
+				self::delete_preview_files( $token );
+				return new \WP_Error( 'bad_image', 'A preview image isn’t a JPEG, PNG, WebP or GIF under 6 MB.', [ 'status' => 400 ] );
+			}
+			file_put_contents( "{$dir}/{$ref}.{$ext}", $data ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+			$saved[ $ref ] = "{$url}/{$ref}.{$ext}";
+		}
+		return $saved;
+	}
+
+	private static function delete_preview_files( string $token ) : void {
+		if ( '' === $token ) {
+			return;
+		}
+		[ $dir ] = self::preview_dir( $token );
+		foreach ( (array) glob( $dir . '/*' ) as $file ) {
+			if ( is_file( $file ) ) {
+				wp_delete_file( $file );
+			}
+		}
+		if ( is_dir( $dir ) ) {
+			@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions
+		}
+	}
+
 	/** The blocks inside markup's placeholder wrapper (or the markup itself). */
 	private static function unwrap( string $markup ) : string {
 		$markup = trim( $markup );
@@ -610,7 +666,20 @@ class Divi {
 			'fields'         => 'ids',
 			'meta_query'     => [ [ 'key' => self::PREVIEW_EXPIRES, 'value' => time(), 'compare' => '<', 'type' => 'NUMERIC' ] ], // phpcs:ignore WordPress.DB.SlowDBQuery
 		] ) as $old ) {
+			self::delete_preview_files( (string) get_post_meta( (int) $old, self::PREVIEW_TOKEN, true ) );
 			wp_delete_post( (int) $old, true );
+		}
+
+		// Images the control center sends along (its own aren't reachable from here) are kept
+		// next to the preview, outside the Media Library, and go with it.
+		$token   = wp_generate_password( 32, false );
+		$content = '<!-- wp:divi/placeholder -->' . implode( '', $parts ) . '<!-- /wp:divi/placeholder -->';
+		$images  = self::save_preview_images( $token, (array) ( $body['images'] ?? [] ) );
+		if ( is_wp_error( $images ) ) {
+			return $images;
+		}
+		foreach ( $images as $ref => $url ) {
+			$content = str_replace( 'x8-preview-image:' . $ref, $url, $content );
 		}
 
 		$title = sanitize_text_field( (string) ( $body['title'] ?? '' ) ) ?: 'Draft';
@@ -618,12 +687,12 @@ class Divi {
 			'post_type'    => 'page',
 			'post_status'  => 'private',
 			'post_title'   => 'Preview: ' . $title,
-			'post_content' => wp_slash( '<!-- wp:divi/placeholder -->' . implode( '', $parts ) . '<!-- /wp:divi/placeholder -->' ),
+			'post_content' => wp_slash( $content ),
 		], true );
 		if ( is_wp_error( $id ) ) {
+			self::delete_preview_files( $token );
 			return $id;
 		}
-		$token = wp_generate_password( 32, false );
 		update_post_meta( $id, self::PREVIEW_TOKEN, $token );
 		update_post_meta( $id, self::PREVIEW_EXPIRES, time() + self::PREVIEW_TTL );
 		update_post_meta( $id, '_et_pb_use_builder', 'on' );
@@ -1346,7 +1415,7 @@ class Divi {
 					}
 				}
 			}
-			$old    = '' !== $id ? self::as_array( $bucket['items'][ $id ] ) : [];
+			$old    = '' !== $id ? self::as_array( $bucket['items'][ $id ] ?? [] ) : [];
 			$id     = '' !== $id ? $id : wp_generate_uuid4();
 			$preset = array_merge( $old, [
 				'id'          => $id,
